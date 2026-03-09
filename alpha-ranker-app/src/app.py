@@ -9,6 +9,7 @@ import customtkinter as ctk
 from tkinter import ttk, messagebox
 import tkinter as tk
 from core import portfolio, data, model, agent
+from core.ranking_insights import add_ranking_insights
 from core.ollama_setup import (is_ollama_installed, is_ollama_running,
                                 full_setup as ollama_full_setup, MODELS as OLLAMA_MODELS)
 try:
@@ -60,6 +61,7 @@ class AlphaRanker(ctk.CTk):
             self.model_results=c.get("results"); self.feat_imp=c.get("feat_imp")
             self.model_info=c.get("model_info"); self.macro=c.get("macro")
             self.after(100,self._refresh_data_updated_label)
+            self.after(150,self._upd_rankings)
         self.after(1000,self._refresh_prices)
         self.after(5000,self._morning_briefing)  # Market briefing after prices load
         api_key=portfolio.get_setting("anthropic_key")
@@ -487,13 +489,15 @@ class AlphaRanker(ctk.CTk):
         for m in ["3","6","12","24"]:
             ctk.CTkRadioButton(ff,text=f"{m}M",variable=self.hz_var,value=m,font=("",10),
                               command=self._upd_rankings).pack(side="left",padx=2)
-        cols=("rank","ticker","name","sector","return","conviction","analyst","sentiment","pe","growth","fcf","mom")
+        cols=("rank","ticker","name","sector","change","stability","return","conviction","analyst","sentiment","pe","growth","fcf","mom")
         self.rk_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["#","Ticker","Name","Sector","Predicted","Conv","Analyst","Sent","P/E","Grwth","FCF","Mom"],
-                          [30,60,125,95,80,70,65,65,50,55,50,55]):
-            self.rk_tree.heading(c,text=h); self.rk_tree.column(c,width=w,anchor="e" if c not in ("ticker","name","sector","analyst") else "w")
+        for c,h,w in zip(cols,["#","Ticker","Name","Sector","Change","Stability","Predicted","Conv","Analyst","Sent","P/E","Grwth","FCF","Mom"],
+                          [30,60,115,85,58,95,72,62,58,58,48,50,48,50]):
+            self.rk_tree.heading(c,text=h); self.rk_tree.column(c,width=w,anchor="e" if c not in ("ticker","name","sector","analyst","stability") else "w")
         self.rk_tree.grid(row=1,column=0,sticky="nsew")
         self.rk_tree.bind("<Double-1>",lambda e:self._stock_popup_from_tree())
+        self._rk_tooltip_id=None; self._rk_tooltip_win=None
+        self.rk_tree.bind("<Motion>",self._rk_on_motion); self.rk_tree.bind("<Leave>",self._rk_on_leave)
         self.rk_tree.tag_configure("hot",foreground="#34d399",font=("JetBrains Mono",11,"bold"))
         self.rk_tree.tag_configure("warm",foreground="#fbbf24")
         self.rk_tree.tag_configure("normal",foreground="#e4e4e7")
@@ -535,6 +539,9 @@ class AlphaRanker(ctk.CTk):
                 if res is None: self.after(0,lambda:self.rk_status.configure(text="Failed",text_color="#f87171")); return
                 self.model_results=res; self.feat_imp=fi; self.model_info=info; self.macro=mac
                 self.model_state=model.get_model_state()
+                try:
+                    portfolio.save_ranking_snapshot(res)
+                except Exception: pass
                 self._refresh_data_updated_label()
                 pmic=info.get("per_model_ic",{})
                 pm=" ".join(f"{n[:3]}:{v:.3f}" for n,v in pmic.items()) if pmic else str(info.get("n_stocks","?"))+" stocks"
@@ -547,8 +554,20 @@ class AlphaRanker(ctk.CTk):
     def _upd_rankings(self):
         if self.model_results is None: return
         hz=int(self.hz_var.get()); sc=lambda r: r if hz==12 else round(r*(hz/12)**0.75,1)
+        df50=self.model_results.head(50).copy()
+        prev=portfolio.get_latest_snapshot_before()
+        history_by_ticker={}
+        for t in df50["ticker"].tolist():
+            history_by_ticker[t]=portfolio.get_ranking_history(t,20)
+        display_df=add_ranking_insights(df50,prev,history_by_ticker)
+        self._rankings_display_df=display_df
+        try:
+            last_run=portfolio.get_current_run_timestamp()
+            if last_run and hasattr(self,"rk_data_updated"):
+                self.rk_data_updated.configure(text=f"Last model run: {last_run}",text_color="#34d399")
+        except Exception: pass
         self.rk_tree.delete(*self.rk_tree.get_children())
-        for _,r in self.model_results.head(50).iterrows():
+        for _,r in display_df.iterrows():
             ret=sc(r["predicted_return_pct"]); conf=r.get("confidence",0)
             conv=_conv(conf)
             pe=f"{r['pe_forward']:.1f}" if _ok(r.get("pe_forward")) else "-"
@@ -563,8 +582,76 @@ class AlphaRanker(ctk.CTk):
             elif conf>=1.2 and ret>15: tag="warm"; rd=f"+{ret}%"
             elif conf<0.5: tag="cold"; rd=f"+{ret}%"
             else: tag="normal"; rd=f"+{ret}%"
-            self.rk_tree.insert("","end",values=(int(r["rank"]),r["ticker"],r.get("name","")[:20],
-                r.get("sector","")[:16],rd,conv,an,sn,pe,gr,fcf,mom),tags=(tag,))
+            rd=r.get("rank_delta"); rd_val=None
+            if rd is not None and (not isinstance(rd,float) or rd==rd): rd_val=int(rd)
+            ch_disp=f"+{rd_val}" if rd_val is not None and rd_val>0 else str(rd_val) if rd_val is not None and rd_val!=0 else "—"
+            stab=r.get("movement_classification") or "—"
+            self.rk_tree.insert("","end",values=(int(r["rank"]),r["ticker"],r.get("name","")[:18],
+                r.get("sector","")[:14],ch_disp,stab[:14],rd,conv,an,sn,pe,gr,fcf,mom),tags=(tag,))
+
+    def _rk_tooltip_text(self, row_series, col_name):
+        """Full value for tooltip by column. row_series is one row of _rankings_display_df."""
+        if col_name=="name": return str(row_series.get("name") or "")
+        if col_name=="sector": return str(row_series.get("sector") or "")
+        if col_name=="change":
+            rd=row_series.get("rank_delta"); v=None
+            if rd is not None and (not isinstance(rd,float) or rd==rd): v=int(rd)
+            ch="+"+str(v) if v is not None and v>0 else str(v) if v is not None else "—"
+            base=f"Change since last run: {ch}"
+            comm=row_series.get("ranking_commentary")
+            return f"{base}\n\n{comm}" if comm else base
+        if col_name=="stability":
+            stab=row_series.get("movement_classification") or "—"
+            si=row_series.get("stability_index"); si_str=f" (rank std: {si:.2f})" if si is not None and si==si and not (isinstance(si,float) and si!=si) else ""
+            return f"Signal stability: {stab}{si_str}"
+        if col_name=="return":
+            p=row_series.get("predicted_return_pct"); return f"Predicted return: {p:.1f}%" if _ok(p) else "Predicted return: —"
+        if col_name=="conviction": return f"Confidence: {row_series.get('confidence',0):.2f}"
+        if col_name=="rank": return f"Rank: {int(row_series.get('rank',0))}"
+        if col_name=="analyst": return f"Analyst recommendation: {row_series.get('recommendation','')}"
+        if col_name in ("pe","growth","fcf","mom"):
+            v=row_series.get({"pe":"pe_forward","growth":"revenue_growth","fcf":"fcf_yield","mom":"momentum_12_1"}[col_name])
+            return f"{col_name}: {v}" if _ok(v) else f"{col_name}: —"
+        if col_name=="sentiment": return f"News sentiment: {row_series.get('news_sentiment','')}"
+        if col_name=="ranking_commentary": return str(row_series.get("ranking_commentary") or "")
+        return str(row_series.get(col_name,""))
+
+    def _rk_show_tooltip(self, item_id, col_idx):
+        try:
+            if self._rk_tooltip_win and self._rk_tooltip_win.winfo_exists(): self._rk_tooltip_win.destroy()
+            if not hasattr(self,"_rankings_display_df") or self._rankings_display_df is None: return
+            vals=self.rk_tree.item(item_id,"values")
+            if not vals or col_idx<0 or col_idx>=len(vals): return
+            ticker=vals[1]; cols=("rank","ticker","name","sector","change","stability","return","conviction","analyst","sentiment","pe","growth","fcf","mom")
+            if col_idx>=len(cols): return
+            col_name=cols[col_idx]
+            row=self._rankings_display_df[self._rankings_display_df["ticker"]==ticker]
+            if row.empty: return
+            r=row.iloc[0]; text=self._rk_tooltip_text(r,col_name)
+            if not text: return
+            self._rk_tooltip_win=ctk.CTkToplevel(self); self._rk_tooltip_win.wm_overrideredirect(True)
+            self._rk_tooltip_win.wm_geometry(f"+{self.winfo_pointerx()+12}+{self.winfo_pointery()+12}")
+            lbl=ctk.CTkLabel(self._rk_tooltip_win,text=text,font=("",10),wraplength=320,fg_color="#27272a",corner_radius=6,padx=10,pady=8)
+            lbl.pack(); self._rk_tooltip_win.lift()
+        except Exception: pass
+
+    def _rk_on_motion(self, event):
+        reg=self.rk_tree.identify_region(event.x,event.y)
+        if reg!="cell":
+            if self._rk_tooltip_id: self.after_cancel(self._rk_tooltip_id); self._rk_tooltip_id=None
+            if self._rk_tooltip_win and self._rk_tooltip_win.winfo_exists(): self._rk_tooltip_win.destroy(); self._rk_tooltip_win=None
+            return
+        item=self.rk_tree.identify_row(event.y); col=self.rk_tree.identify_column(event.x)
+        if not item or not col or col=="#0": return
+        try: col_idx=int(col[1:],10)-1
+        except: return
+        if self._rk_tooltip_id: self.after_cancel(self._rk_tooltip_id)
+        def _show(): self._rk_show_tooltip(item,col_idx); self._rk_tooltip_id=None
+        self._rk_tooltip_id=self.after(600,_show)
+
+    def _rk_on_leave(self, event):
+        if self._rk_tooltip_id: self.after_cancel(self._rk_tooltip_id); self._rk_tooltip_id=None
+        if self._rk_tooltip_win and self._rk_tooltip_win.winfo_exists(): self._rk_tooltip_win.destroy(); self._rk_tooltip_win=None
 
     def _stock_popup_from_tree(self):
         sel=self.rk_tree.selection()
@@ -713,7 +800,7 @@ class AlphaRanker(ctk.CTk):
         horizon_days=portfolio.get_setting("default_holding_horizon_days")
         horizon_days=int(horizon_days) if horizon_days else 365
         tx_params=TransactionCostParams(broker_fee=broker_fee,spread_bps=spread_bps,slippage_bps=slippage_bps)
-        etf_positions=[("IWDA.AS","iShares MSCI World",0.6),("VWCE.DE","Vanguard All-World",0.4)]
+        etf_positions=None
         raw=self.model_results.copy()
         if "current_price" not in raw.columns:
             raw["current_price"]=None

@@ -35,6 +35,128 @@ except Exception:
     get_portfolio_settings = None
     strategy_type_from_horizon = lambda d: "MEDIUM_TERM" if d <= 180 else "LONG_TERM"
 
+# Sector key used in model (e.g. "Technology") -> registry key (e.g. "technology_weight")
+_SECTOR_TO_WEIGHT_KEY = {
+    "Technology": "technology_weight",
+    "Healthcare": "healthcare_weight",
+    "Energy": "energy_weight",
+    "Financials": "financials_weight",
+    "Industrials": "industrial_weight",
+    "Consumer Discretionary": "consumer_discretionary_weight",
+    "Consumer Staples": "consumer_staples_weight",
+    "Materials": "materials_weight",
+    "Utilities": "utilities_weight",
+    "Real Estate": "real_estate_weight",
+    "Communication Services": "communication_weight",
+}
+
+# ETF sector allocation (approximate weights 0–1). Used for sector-based ETF suggestion and diversification.
+ETF_SECTOR_REGISTRY: dict = {
+    "6AQQ.DE": {"name": "Amundi Nasdaq-100 Swap ETF", "technology_weight": 0.55, "communication_weight": 0.12, "consumer_discretionary_weight": 0.15},
+    "IWDA.AS": {"name": "iShares Core MSCI World", "technology_weight": 0.22, "healthcare_weight": 0.12, "financials_weight": 0.16, "consumer_discretionary_weight": 0.11},
+    "VWCE.DE": {"name": "Vanguard FTSE All-World", "technology_weight": 0.20, "financials_weight": 0.16, "healthcare_weight": 0.12},
+    "QQQ": {"name": "Invesco QQQ", "technology_weight": 0.50, "communication_weight": 0.18, "consumer_discretionary_weight": 0.16},
+    "SPY": {"name": "SPDR S&P 500", "technology_weight": 0.28, "healthcare_weight": 0.13, "financials_weight": 0.12},
+    "XLK": {"name": "Technology Select Sector", "technology_weight": 0.95},
+    "XLE": {"name": "Energy Select Sector", "energy_weight": 0.95},
+    "XLF": {"name": "Financial Select Sector", "financials_weight": 0.95},
+    "XLV": {"name": "Health Care Select Sector", "healthcare_weight": 0.95},
+    "XLI": {"name": "Industrial Select Sector", "industrial_weight": 0.95},
+    "VTI": {"name": "Vanguard Total Stock Market", "technology_weight": 0.28, "financials_weight": 0.14, "healthcare_weight": 0.13},
+}
+
+
+def compute_sector_signals(model_results: pd.DataFrame, top_n: int = 50) -> dict:
+    """
+    Aggregate stock signals by sector: mean alpha_score among top_n ranked.
+    Returns dict sector -> score (higher = stronger sector signal).
+    """
+    if model_results is None or model_results.empty or "sector" not in model_results.columns:
+        return {}
+    df = model_results.head(top_n).copy()
+    if "alpha_score" not in df.columns and "predicted_return_pct" in df.columns:
+        df["alpha_score"] = df["predicted_return_pct"] / 100.0
+    sector_score = df.groupby("sector", dropna=False)["alpha_score"].mean().to_dict()
+    return {s: float(v) for s, v in sector_score.items() if s and pd.notna(v)}
+
+
+def suggest_etfs_from_sector_signals(
+    sector_signals: dict,
+    top_n_sectors: int = 2,
+    max_etfs: int = 3,
+) -> List[tuple]:
+    """
+    Propose ETFs based on sector strength. Returns list of (ticker, name, weight) with equal weights.
+    """
+    if not sector_signals:
+        return []
+    sorted_sectors = sorted(sector_signals.items(), key=lambda x: -x[1])[:top_n_sectors]
+    best_sector_names = [s[0] for s in sorted_sectors]
+    weight_key = None
+    for sn in best_sector_names:
+        weight_key = _SECTOR_TO_WEIGHT_KEY.get(sn)
+        if weight_key:
+            break
+    if not weight_key:
+        return []
+    # Find ETFs with highest exposure to that sector
+    candidates = []
+    for ticker, meta in ETF_SECTOR_REGISTRY.items():
+        w = meta.get(weight_key, 0) or 0
+        if w > 0:
+            name = meta.get("name", ticker)
+            candidates.append((ticker, name, w))
+    candidates.sort(key=lambda x: -x[2])
+    chosen = candidates[:max_etfs]
+    if not chosen:
+        return []
+    eq = 1.0 / len(chosen)
+    return [(t, n, eq) for t, n, _ in chosen]
+
+
+def _sector_value_from_holdings(holdings: List[dict], exclude_tickers: Optional[set] = None) -> tuple:
+    """Returns (sector_value_dict, total_value). Uses sector or sectors_json per holding."""
+    import json
+    sector_val: dict = {}
+    total = 0.0
+    exclude = exclude_tickers or set()
+    for h in holdings:
+        if h.get("ticker") in exclude:
+            continue
+        units = h.get("units") or 0
+        price = h.get("current_price") or h.get("avg_price") or 0
+        if not units or not price:
+            continue
+        val = float(units) * float(price)
+        total += val
+        sec_json = h.get("sectors_json")
+        if sec_json:
+            try:
+                secs = json.loads(sec_json) if isinstance(sec_json, str) else sec_json
+                for s, w in (secs or {}).items():
+                    sector_val[s] = sector_val.get(s, 0) + val * float(w)
+            except Exception:
+                pass
+        else:
+            s = h.get("sector") or "Unknown"
+            sector_val[s] = sector_val.get(s, 0) + val
+    return sector_val, total
+
+
+def _etf_sector_value(etf_positions: List[tuple], etf_budget: float) -> dict:
+    """Sector value implied by ETF allocations (from registry weights)."""
+    sector_val: dict = {}
+    for ticker, _name, weight in etf_positions:
+        alloc = etf_budget * weight
+        meta = ETF_SECTOR_REGISTRY.get(ticker, {})
+        for key, w in meta.items():
+            if key == "name" or not key.endswith("_weight"):
+                continue
+            # key e.g. technology_weight -> sector "Technology"
+            sector_name = next((s for s, k in _SECTOR_TO_WEIGHT_KEY.items() if k == key), key.replace("_weight", "").title())
+            sector_val[sector_name] = sector_val.get(sector_name, 0) + alloc * float(w)
+    return sector_val
+
 
 def build_suggested_portfolio(
     model_results: pd.DataFrame,
@@ -49,6 +171,7 @@ def build_suggested_portfolio(
     holding_horizon_days: Optional[int] = None,
     default_stop_loss_pct: float = 10.0,
     existing_holdings: Optional[List[dict]] = None,
+    max_sector_pct: float = 0.40,
 ) -> List[dict]:
     """
     Build a suggested portfolio from alpha model results. If existing_holdings is provided,
@@ -125,6 +248,16 @@ def build_suggested_portfolio(
     stock_budget = budget - etf_budget + freed_capital
     if stock_budget < 0:
         stock_budget = 0
+
+    # Automatic ETF selection from sector signals when etf_positions not provided
+    if etf_budget > 0 and etf_positions is None and model_results is not None and not model_results.empty:
+        sector_signals = compute_sector_signals(model_results)
+        etf_positions = suggest_etfs_from_sector_signals(sector_signals, top_n_sectors=2, max_etfs=3)
+        if not etf_positions:
+            etf_positions = [
+                ("IWDA.AS", "iShares MSCI World", 0.6),
+                ("VWCE.DE", "Vanguard All-World", 0.4),
+            ]
 
     # ETF slice: fixed allocations; use real price for units
     if etf_budget > 0 and etf_positions:
@@ -229,6 +362,17 @@ def build_suggested_portfolio(
                     if not df.empty:
                         positions = engine.allocate(df, price_col="current_price", alpha_col="alpha_score", confidence_col="confidence")
                     break
+        # Sector diversification: current exposure from holdings (excl. SELL) + ETF slice
+        sell_tickers = {o["ticker"] for o in out if o.get("action") == "SELL"}
+        sector_val, holdings_total = _sector_value_from_holdings(holdings, exclude_tickers=sell_tickers)
+        total_val = holdings_total
+        if etf_budget > 0 and etf_positions:
+            for s, v in _etf_sector_value(etf_positions, etf_budget).items():
+                sector_val[s] = sector_val.get(s, 0) + v
+            total_val = holdings_total + etf_budget
+        running_sector = dict(sector_val)
+        running_total = total_val
+
         def _add_position(
             p: dict,
             name: str,
@@ -275,6 +419,9 @@ def build_suggested_portfolio(
                 p["reason"] = (p.get("reason", "") or "") + " (relaxed tx)"
             p["action"] = "BUY"
             out.append(p)
+            nonlocal running_sector, running_total
+            running_sector[sector] = running_sector.get(sector, 0) + invested
+            running_total += invested
 
         relaxed_multiple = 2.0  # fallback when 3x would yield zero candidates
         for min_mult in (min_return_vs_cost_multiple, relaxed_multiple):
@@ -297,6 +444,11 @@ def build_suggested_portfolio(
                     continue
                 # Skip if we already added this ticker in a previous pass
                 if any(o.get("ticker") == p["ticker"] and o.get("src") == "Model" for o in out):
+                    continue
+                # Diversification: skip if this position would push sector over max_sector_pct
+                new_sector_val = running_sector.get(sector, 0) + invested
+                new_total = running_total + invested
+                if new_total > 0 and new_sector_val / new_total > max_sector_pct:
                     continue
                 review_date = (datetime.now() + timedelta(days=review_frequency_days)).strftime("%Y-%m-%d")
                 stop_pct = default_stop_loss_pct / 100.0

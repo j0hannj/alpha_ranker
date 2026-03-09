@@ -64,6 +64,16 @@ def _conn():
         domain TEXT PRIMARY KEY,
         value TEXT
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS ranking_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        alpha_score REAL,
+        rank_position INTEGER NOT NULL,
+        confidence REAL,
+        timestamp TEXT NOT NULL,
+        run_id TEXT
+    )""")
+    c.execute("""CREATE INDEX IF NOT EXISTS idx_ranking_history_ticker_ts ON ranking_history(ticker, timestamp)""")
     c.commit()
     return c
 
@@ -228,3 +238,73 @@ def init_default_portfolio():
         for d in defaults:
             ticker = fallback_tickers.get(d[0], d[0])
             add(ticker, d[1], d[2], d[3], d[4], d[5], d[6], d[7])
+
+
+# ══════════════════════════════════════════════════════════════
+# RANKING HISTORY (for delta analysis and stability)
+# ══════════════════════════════════════════════════════════════
+def save_ranking_snapshot(results_df, run_id=None):
+    """Store current ranking for each asset. results_df must have columns: ticker, alpha_score, rank/alpha_rank, confidence."""
+    if results_df is None or results_df.empty:
+        return
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    run_id = run_id or ts
+    c = _conn()
+    rank_col = "rank" if "rank" in results_df.columns else "alpha_rank"
+    for _, row in results_df.iterrows():
+        ticker = row.get("ticker")
+        if not ticker:
+            continue
+        rank_pos = int(row.get(rank_col, 0)) if rank_col in row.columns else 0
+        alpha = row.get("alpha_score")
+        alpha = float(alpha) if alpha is not None and alpha == alpha else None
+        conf = row.get("confidence")
+        conf = float(conf) if conf is not None and conf == conf else None
+        c.execute(
+            "INSERT INTO ranking_history (ticker, alpha_score, rank_position, confidence, timestamp, run_id) VALUES (?,?,?,?,?,?)",
+            (ticker, alpha, rank_pos, conf, ts, run_id),
+        )
+    c.commit()
+    c.close()
+
+
+def get_ranking_history(ticker, last_n=20):
+    """Return list of dicts with alpha_score, rank_position, confidence, timestamp for the ticker (most recent first)."""
+    c = _conn()
+    rows = c.execute(
+        "SELECT alpha_score, rank_position, confidence, timestamp FROM ranking_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT ?",
+        (ticker, last_n),
+    ).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+
+def get_latest_snapshot_before(timestamp=None):
+    """Return the most recent full snapshot (all tickers) before given timestamp, as dict ticker -> {rank_position, alpha_score, confidence, timestamp}."""
+    c = _conn()
+    if timestamp:
+        run_ts = c.execute(
+            "SELECT DISTINCT timestamp FROM ranking_history WHERE timestamp < ? ORDER BY timestamp DESC LIMIT 1",
+            (timestamp,),
+        ).fetchone()
+        run_ts = run_ts[0] if run_ts else None
+    else:
+        run_ts = c.execute("SELECT DISTINCT timestamp FROM ranking_history ORDER BY timestamp DESC LIMIT 1 OFFSET 1").fetchone()
+        run_ts = run_ts[0] if run_ts else None
+    if not run_ts:
+        c.close()
+        return None
+    rows = c.execute(
+        "SELECT ticker, alpha_score, rank_position, confidence, timestamp FROM ranking_history WHERE timestamp = ?",
+        (run_ts,),
+    ).fetchall()
+    c.close()
+    return {r["ticker"]: dict(r) for r in rows}
+
+
+def get_current_run_timestamp():
+    """Return the timestamp of the most recent ranking run (current snapshot)."""
+    c = _conn()
+    row = c.execute("SELECT timestamp FROM ranking_history ORDER BY timestamp DESC LIMIT 1").fetchone()
+    c.close()
+    return row[0] if row else None
