@@ -91,42 +91,70 @@ def fetch_all_fundamentals(tickers, api_key, callback=None):
     return data
 
 # ══════════════════════════════════════════════════════════════
-# ENSEMBLE ENGINE
+# ENSEMBLE ENGINE (config-driven: enabled models, ensemble method)
 # ══════════════════════════════════════════════════════════════
-def _get_models():
+def _get_models(config=None):
+    """Build model dict. If config provided, only enabled_models are included."""
     from lightgbm import LGBMRegressor
     from xgboost import XGBRegressor
-    from sklearn.linear_model import Ridge
+    from sklearn.linear_model import Ridge, ElasticNet
     from sklearn.ensemble import RandomForestRegressor
-    return {
-        "LightGBM": LGBMRegressor(n_estimators=500,max_depth=5,learning_rate=0.03,
+    n_est = 500; depth = 5; lr = 0.03
+    ridge_alpha = 10.0
+    if config:
+        n_est = config.get("n_estimators", n_est)
+        depth = config.get("max_depth", depth)
+        lr = config.get("learning_rate", lr)
+        ridge_alpha = config.get("ridge_alpha", ridge_alpha)
+    all_models = {
+        "LightGBM": LGBMRegressor(n_estimators=n_est,max_depth=depth,learning_rate=lr,
             subsample=0.7,colsample_bytree=0.6,min_child_samples=15,
             reg_alpha=0.3,reg_lambda=0.3,random_state=42,verbose=-1,n_jobs=-1),
-        "XGBoost": XGBRegressor(n_estimators=500,max_depth=5,learning_rate=0.03,
+        "XGBoost": XGBRegressor(n_estimators=n_est,max_depth=depth,learning_rate=lr,
             subsample=0.7,colsample_bytree=0.6,min_child_weight=15,
             reg_alpha=0.3,reg_lambda=0.3,random_state=42,verbosity=0,n_jobs=-1),
-        "Ridge": Ridge(alpha=10.0),
-        "RandomForest": RandomForestRegressor(n_estimators=300,max_depth=8,
+        "Ridge": Ridge(alpha=ridge_alpha),
+        "ElasticNet": ElasticNet(alpha=config.get("elastic_net_alpha",1.0) if config else 1.0,
+            l1_ratio=config.get("elastic_net_l1_ratio",0.5) if config else 0.5),
+        "RandomForest": RandomForestRegressor(n_estimators=min(300,n_est),max_depth=min(8,depth),
             min_samples_leaf=15,max_features=0.6,random_state=42,n_jobs=-1),
     }
+    if config:
+        enabled = config.get("enabled_models") or list(all_models.keys())
+        return {k: v for k, v in all_models.items() if k in enabled}
+    return all_models
 
-def predict_ensemble(models_dict, X, method="ic_weighted"):
-    """Ensemble prediction. Combines models weighted by their OOS information coefficient.
-    Returns (predictions_array, blend_info_dict)."""
+def predict_ensemble(models_dict, X, method="ic_weighted", return_per_model=False):
+    """Ensemble prediction. method: simple_average | ic_weighted_average | stacked_meta_model.
+    Returns (predictions_array, blend_info_dict). If return_per_model=True, blend includes 'per_model_preds' for agreement/reliability."""
     all_preds = {}; weights = {}
     for name, info in models_dict.items():
         if info.get("model") is None: continue
         try:
             p = info["model"].predict(X)
-            all_preds[name] = p
+            all_preds[name] = np.asarray(p)
             weights[name] = max(info.get("ic",info.get("cv_r2",0.01)), 0.001)
         except: pass
     if not all_preds: return np.zeros(len(X)), {}
-    total_w = sum(weights.values())
-    final = sum(all_preds[n]*(weights[n]/total_w) for n in all_preds)
-    blend = {n:{"weight":round(weights[n]/total_w,3),"mean_pred":round(float(np.mean(p)),4)}
+    if method == "simple_average":
+        final = np.mean(np.array(list(all_preds.values())), axis=0)
+    else:
+        total_w = sum(weights.values())
+        final = sum(all_preds[n]*(weights[n]/total_w) for n in all_preds)
+    blend = {n:{"weight":round(weights[n]/sum(weights.values()),3),"mean_pred":round(float(np.mean(p)),4)}
              for n,p in all_preds.items()}
+    if return_per_model:
+        blend["per_model_preds"] = all_preds  # name -> array of length n_samples
     return final, blend
+
+def _apply_winsorization(X, feat_cols, quantile=0.02):
+    """Cross-sectional winsorization to limit extreme values."""
+    out = X.copy()
+    for c in feat_cols:
+        if c not in out.columns: continue
+        q = out[c].quantile([quantile, 1 - quantile])
+        out[c] = out[c].clip(lower=q.iloc[0], upper=q.iloc[1])
+    return out
 
 def _get_feature_importance(models_dict, feat_cols):
     total = np.zeros(len(feat_cols)); count = 0
@@ -141,8 +169,16 @@ def _get_feature_importance(models_dict, feat_cols):
 # WALK-FORWARD BACKTESTING
 # ══════════════════════════════════════════════════════════════
 def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
-                       start_year=2019, horizon_months=12, callback=None):
-    """Walk-forward with ensemble. Enforces temporal consistency throughout."""
+                       start_year=2019, horizon_months=12, callback=None, config=None):
+    """Walk-forward with ensemble. Uses config from DB if not provided (enabled_models, ensemble_method, winsorization)."""
+    try:
+        from core.engine_config import get_model_settings, get_feature_settings, get_enabled_feature_columns
+    except Exception:
+        get_model_settings = get_feature_settings = get_enabled_feature_columns = None
+    if config is None and get_model_settings:
+        config = get_model_settings()
+    if config is None:
+        config = {}
     rebal_dates = [datetime(y,m,1) for y in range(start_year,datetime.now().year+1)
                    for m in [1,4,7,10] if datetime(y,m,1) < datetime.now()-timedelta(days=horizon_months*30)]
     if callback: callback(f"Walk-forward: {len(rebal_dates)} periods")
@@ -159,12 +195,23 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
     if not all_periods:
         if callback: callback("Not enough data"); return None,None,None,None,None
     full_df = pd.concat(all_periods,ignore_index=True)
-    feat_cols = [c for c in full_df.columns if c not in meta_cols+["period_idx"]
-                 and full_df[c].dtype in [np.float64,np.int64,float,int]]
+    all_num_cols = [c for c in full_df.columns if c not in meta_cols+["period_idx"]
+                    and full_df[c].dtype in [np.float64,np.int64,float,int]]
+    if get_enabled_feature_columns and get_feature_settings:
+        enabled_cols = set(get_enabled_feature_columns())
+        feat_cols = [c for c in all_num_cols if c in enabled_cols]
+        if not feat_cols:
+            feat_cols = all_num_cols
+    else:
+        feat_cols = all_num_cols
     if callback: callback(f"{len(full_df)} obs, {len(feat_cols)} features, {full_df['period_idx'].nunique()} periods")
 
+    models_template = _get_models(config)
     period_indices = sorted(full_df["period_idx"].unique()); min_train=8
-    oos_preds=[]; per_model_oos = {n:[] for n in _get_models().keys()}
+    oos_preds=[]; per_model_oos = {n:[] for n in models_template.keys()}
+    ensemble_method = config.get("ensemble_method") or "ic_weighted_average"
+    winsorize = config.get("winsorization", False)
+    winsorize_q = config.get("winsorize_quantile", 0.02)
     for i,tp in enumerate(period_indices):
         if i<min_train: continue
         trn = full_df[full_df["period_idx"].isin(period_indices[:i])]
@@ -175,24 +222,31 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         med = Xtr.median()
         Xtr = Xtr.fillna(med).replace([np.inf,-np.inf],np.nan).fillna(med)
         Xte = Xte.fillna(med).replace([np.inf,-np.inf],np.nan).fillna(med)
+        if winsorize:
+            Xtr = _apply_winsorization(Xtr, feat_cols, winsorize_q)
+            Xte = _apply_winsorization(Xte, feat_cols, winsorize_q)
         # Rank transform + sector neutralize for training
         Xtr_r = rank_features(Xtr,feat_cols)
         Xte_r = rank_features(Xte,feat_cols)
+        if config.get("sector_neutralization", True) and "sector" in full_df.columns:
+            Xtr_r = Xtr_r.copy(); Xtr_r["sector"] = trn["sector"].values
+            Xtr_r = sector_neutralize(Xtr_r, feat_cols, "sector"); Xtr_r = Xtr_r.drop(columns=["sector"], errors="ignore")
+            Xte_r = Xte_r.copy(); Xte_r["sector"] = tst["sector"].values
+            Xte_r = sector_neutralize(Xte_r, feat_cols, "sector"); Xte_r = Xte_r.drop(columns=["sector"], errors="ignore")
         ytr = ytr.clip(ytr.quantile(0.02),ytr.quantile(0.98))
-        models = _get_models()
+        models = _get_models(config)
         for name,m in models.items():
             try:
                 m.fit(Xtr_r,ytr); p=m.predict(Xte_r)
                 ic = stats.spearmanr(p,yte.values)[0] if len(yte)>5 else 0
-                per_model_oos[name].append(ic)
-            except: per_model_oos[name].append(0)
-        # Ensemble for this period
-        ens = {n:{"model":m,"ic":np.mean(per_model_oos[n]) if per_model_oos[n] else 0.01}
+                per_model_oos.setdefault(name, []).append(ic)
+            except: per_model_oos.setdefault(name, []).append(0)
+        ens = {n:{"model":m,"ic":np.mean(per_model_oos.get(n,[])) or 0.01}
                for n,m in models.items()}
         for n,m in models.items():
             try: m.fit(Xtr_r,ytr); ens[n]["model"]=m
             except: pass
-        ep,_ = predict_ensemble(ens,Xte_r)
+        ep,_ = predict_ensemble(ens,Xte_r, method=ensemble_method if isinstance(ensemble_method, str) else "ic_weighted_average")
         for j,(idx,row) in enumerate(tst.iterrows()):
             oos_preds.append({"ticker":row["ticker"],"period":int(tp),"predicted":ep[j],"actual":row["forward_return"]})
 
@@ -227,19 +281,21 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
     X_all = full_df[feat_cols].copy(); y_all = full_df["forward_return"].copy()
     med_final = X_all.median()
     X_all = X_all.fillna(med_final).replace([np.inf,-np.inf],np.nan).fillna(med_final)
+    if winsorize:
+        X_all = _apply_winsorization(X_all, feat_cols, winsorize_q)
     X_all = rank_features(X_all,feat_cols)
-    if "sector" in full_df.columns:
+    if config.get("sector_neutralization", True) and "sector" in full_df.columns:
         X_all["sector"] = full_df["sector"].values
         X_all = sector_neutralize(X_all,feat_cols,"sector")
         X_all = X_all.drop(columns=["sector"],errors="ignore")
     y_all = y_all.clip(y_all.quantile(0.02),y_all.quantile(0.98))
     final_models = {}
-    for name,m in _get_models().items():
+    for name,m in _get_models(config).items():
         try:
             m.fit(X_all,y_all)
             final_models[name] = {"model":m,
-                "ic":np.mean(per_model_oos.get(name,[])) if per_model_oos.get(name) else 0.01,
-                "cv_r2":np.mean(per_model_oos.get(name,[])) if per_model_oos.get(name) else 0}
+                "ic":np.mean(per_model_oos.get(name,[])) or 0.01,
+                "cv_r2":np.mean(per_model_oos.get(name,[])) or 0}
             if callback: callback(f"  {name}: trained, OOS IC={final_models[name]['ic']:.4f}")
         except: pass
     feat_imp = _get_feature_importance(final_models,feat_cols)
@@ -249,8 +305,17 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
 # CURRENT PREDICTIONS → ALPHA SCORE + RANK
 # ══════════════════════════════════════════════════════════════
 def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
-                    macro, sector_map, tickers, yf_info=None, callback=None):
-    """Generate current alpha scores and ranks using the trained ensemble."""
+                    macro, sector_map, tickers, yf_info=None, callback=None, config=None):
+    """Generate current alpha scores and ranks using the trained ensemble. Uses config for ensemble_method and winsorization."""
+    if config is None:
+        try:
+            from core.engine_config import get_model_settings
+            config = get_model_settings() or {}
+        except Exception:
+            config = {}
+    ensemble_method = config.get("ensemble_method") or "ic_weighted_average"
+    winsorize = config.get("winsorization", False)
+    winsorize_q = config.get("winsorize_quantile", 0.02)
     if callback: callback("Generating alpha scores...")
     df = build_features_asof(prices,fundamentals_db,macro,datetime.now(),tickers)
     df = add_sector_interactions(df,sector_map)
@@ -263,8 +328,21 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
         df["num_analysts"] = df["ticker"].map(lambda t: yf_info.get(t,{}).get("numberOfAnalystOpinions"))
 
     X = df[feat_cols].fillna(medians).replace([np.inf,-np.inf],np.nan).fillna(medians)
+    if winsorize:
+        X = _apply_winsorization(X, feat_cols, winsorize_q)
     X = rank_features(X, feat_cols)  # Same transform as training
-    preds, blend = predict_ensemble(models_dict, X)
+    n_models = sum(1 for info in models_dict.values() if info.get("model") is not None)
+    preds, blend = predict_ensemble(models_dict, X, method=ensemble_method, return_per_model=(n_models > 1))
+
+    # Model agreement: fraction of models predicting positive return
+    if n_models > 1 and "per_model_preds" in blend:
+        per_model = blend["per_model_preds"]
+        pos_count = np.zeros(len(X))
+        for p in per_model.values():
+            pos_count += (np.asarray(p) > 0).astype(float)
+        df["model_agreement_score"] = (pos_count / n_models).round(3)
+    else:
+        df["model_agreement_score"] = 1.0
 
     # Raw alpha score before factor neutralization
     df["alpha_score_raw"] = preds
@@ -282,6 +360,11 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     # Confidence = z-score of alpha
     med,std = np.median(preds),np.std(preds)
     df["confidence"] = ((df["alpha_score"]-med)/std).round(2) if std>0 else 0
+    # Reliability: combine alpha, confidence, and model agreement (prioritize high agreement)
+    ar, cr = df["alpha_score"], df["confidence"]
+    a_norm = (ar - ar.min()) / (ar.max() - ar.min() + 1e-9)
+    c_norm = (cr - cr.min()) / (cr.max() - cr.min() + 1e-9)
+    df["reliability_score"] = (0.4 * a_norm + 0.3 * c_norm + 0.3 * df["model_agreement_score"]).round(3)
 
     # Rename for display compatibility
     for col in ["pe_ratio","peg_ratio","revenue_growth_yoy","gross_margin","net_margin",
@@ -585,17 +668,28 @@ def run_full_pipeline(callback=None):
 
     if fmp_key:
         if callback: callback("Full mode: FMP + walk-forward ensemble")
+        try:
+            from core.engine_config import get_model_settings, init_default_config
+            init_default_config()
+            config = get_model_settings()
+        except Exception:
+            config = {}
         fund_db = fetch_all_fundamentals(list(yf_fund.keys()),fmp_key,callback)
         if len(fund_db)<30:
             return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment)
         wf = walk_forward_train(prices,fund_db,macro,sector_map,list(fund_db.keys()),
-                               start_year=2019,callback=callback)
+                               start_year=2019,callback=callback,config=config)
         if wf[0] is None:
             return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment)
         final_models,medians,feat_cols,feat_imp,oos_metrics = wf
+        # Execution mode: single → keep only selected model
+        if config and config.get("execution_mode") == "single":
+            single_id = config.get("single_model_id")
+            if single_id and single_id in final_models:
+                final_models = {single_id: final_models[single_id]}
         results,blend = predict_current(final_models,medians,feat_cols,prices,fund_db,
                                         macro,sector_map,list(yf_fund.keys()),
-                                        yf_info=yf_fund,callback=callback)
+                                        yf_info=yf_fund,callback=callback,config=config)
         if sentiment: results["news_sentiment"]=results["ticker"].map(sentiment).fillna(0)
         model_info = {"mode":"walk_forward_ensemble","n_features":len(feat_cols),"blend":blend,**oos_metrics}
         # Store full model state for explanations

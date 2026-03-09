@@ -58,6 +58,10 @@ def _conn():
     c.execute("""CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY, value TEXT
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS system_config (
+        domain TEXT PRIMARY KEY,
+        value TEXT
+    )""")
     c.commit()
     return c
 
@@ -107,6 +111,25 @@ def get_setting(key, default=None):
 def set_setting(key, value):
     c = _conn()
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    c.commit(); c.close()
+
+def get_system_config(domain):
+    """Load JSON config for a domain (model_settings, portfolio_settings, feature_settings, etc.)."""
+    c = _conn()
+    r = c.execute("SELECT value FROM system_config WHERE domain = ?", (domain,)).fetchone()
+    c.close()
+    if not r or not r[0]:
+        return None
+    try:
+        return json.loads(r[0])
+    except Exception:
+        return None
+
+def set_system_config(domain, value):
+    """Store JSON config for a domain. value: dict (will be JSON-serialized)."""
+    c = _conn()
+    c.execute("INSERT OR REPLACE INTO system_config (domain, value) VALUES (?, ?)",
+             (domain, json.dumps(value, default=str)))
     c.commit(); c.close()
 
 def compute_pnl(holdings_list, fx_rate=1.08, gbp_rate=1.16, base="EUR"):

@@ -11,6 +11,10 @@ import tkinter as tk
 from core import portfolio, data, model, agent
 from core.ollama_setup import (is_ollama_installed, is_ollama_running,
                                 full_setup as ollama_full_setup, MODELS as OLLAMA_MODELS)
+try:
+    from core import engine_config as _engine_cfg
+except Exception:
+    _engine_cfg = None
 ctk.set_appearance_mode("dark"); ctk.set_default_color_theme("blue")
 
 # ══════════════════════════════════════════════════════════════
@@ -1004,6 +1008,8 @@ class AlphaRanker(ctk.CTk):
         scroll.pack(fill="both",expand=True,padx=5,pady=5)
         scroll.grid_columnconfigure(1,weight=1)
         self._sett={}
+        self._engine_vars = {}
+        self._engine_widgets = {}
         row=0
 
         # API Keys
@@ -1032,6 +1038,50 @@ class AlphaRanker(ctk.CTk):
             self._sett[k]=e
             ctk.CTkLabel(scroll,text=hint,font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
             row+=1
+
+        # Engine / Model configuration (DB-backed)
+        if _engine_cfg:
+            try:
+                _engine_cfg.init_default_config()
+            except Exception:
+                pass
+            ctk.CTkLabel(scroll,text="Engine / Model configuration",font=("",15,"bold")).grid(row=row,column=0,columnspan=3,sticky="w",pady=(15,8)); row+=1
+            mset = _engine_cfg.get_model_settings()
+            fset = _engine_cfg.get_feature_settings()
+            enabled = mset.get("enabled_models") or _engine_cfg.MODEL_IDS
+            for mid in _engine_cfg.MODEL_IDS:
+                v = tk.BooleanVar(value=mid in enabled)
+                ctk.CTkCheckBox(scroll,text=mid,variable=v,font=("",11)).grid(row=row,column=0,columnspan=2,sticky="w",padx=8,pady=2)
+                self._engine_vars["model_"+mid]=v
+                row+=1
+            ctk.CTkLabel(scroll,text="Execution mode",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+            em_var = tk.StringVar(value=mset.get("execution_mode","all"))
+            em_dd = ctk.CTkOptionMenu(scroll,values=_engine_cfg.EXECUTION_MODES,variable=em_var,width=120)
+            em_dd.grid(row=row,column=1,sticky="w",pady=3); self._engine_vars["execution_mode"]=em_var; row+=1
+            ctk.CTkLabel(scroll,text="Single model (when mode=single)",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+            sm_var = tk.StringVar(value=mset.get("single_model_id","LightGBM"))
+            ctk.CTkOptionMenu(scroll,values=_engine_cfg.MODEL_IDS,variable=sm_var,width=120).grid(row=row,column=1,sticky="w",pady=3)
+            self._engine_vars["single_model_id"]=sm_var; row+=1
+            ctk.CTkLabel(scroll,text="Ensemble method",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+            ens_var = tk.StringVar(value=mset.get("ensemble_method","ic_weighted_average"))
+            ctk.CTkOptionMenu(scroll,values=_engine_cfg.ENSEMBLE_METHODS,variable=ens_var,width=180).grid(row=row,column=1,sticky="w",pady=3)
+            self._engine_vars["ensemble_method"]=ens_var; row+=1
+            for k,l in [("winsorization","Winsorization"),("rank_normalization","Rank normalization"),("sector_neutralization","Sector neutralization")]:
+                v = tk.BooleanVar(value=mset.get(k,True))
+                ctk.CTkCheckBox(scroll,text=l,variable=v,font=("",11)).grid(row=row,column=0,columnspan=2,sticky="w",padx=8,pady=2)
+                self._engine_vars[k]=v; row+=1
+            for k,l,d in [("lookback_days","Lookback (days)",252),("training_window_years","Training window (years)",3),("retraining_frequency_months","Retraining (months)",3),
+                ("n_estimators","n_estimators",500),("max_depth","max_depth",5),("learning_rate","Learning rate",0.03),("ridge_alpha","Ridge alpha",10.0),
+                ("winsorize_quantile","Winsorize quantile",0.02)]:
+                ctk.CTkLabel(scroll,text=l,font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+                e=ctk.CTkEntry(scroll,width=100,font=("JetBrains Mono",10))
+                e.grid(row=row,column=1,sticky="w",pady=3); e.insert(0,str(mset.get(k,d)))
+                self._engine_widgets[k]=e; row+=1
+            ctk.CTkLabel(scroll,text="Feature groups",font=("",13,"bold")).grid(row=row,column=0,columnspan=3,sticky="w",pady=(10,6)); row+=1
+            for gname in _engine_cfg.FEATURE_GROUPS:
+                v = tk.BooleanVar(value=fset.get(gname,True))
+                ctk.CTkCheckBox(scroll,text=gname,variable=v,font=("",11)).grid(row=row,column=0,columnspan=2,sticky="w",padx=8,pady=2)
+                self._engine_vars["feat_"+gname]=v; row+=1
 
         # Investment Profile
         ctk.CTkLabel(scroll,text="Investment Profile",font=("",15,"bold")).grid(row=row,column=0,columnspan=3,sticky="w",pady=(15,8)); row+=1
@@ -1076,6 +1126,43 @@ class AlphaRanker(ctk.CTk):
         for k,ev in [("fred_key","FRED_API_KEY"),("fmp_key","FMP_API_KEY"),("av_key","ALPHA_VANTAGE_KEY")]:
             v=portfolio.get_setting(k)
             if v: os.environ[ev]=v
+        if _engine_cfg and getattr(self,"_engine_vars",None) and getattr(self,"_engine_widgets",None):
+            try:
+                def _ev(k, default=False):
+                    v = self._engine_vars.get(k)
+                    return v.get() if v is not None else default
+                def _ew(k, default, cast=int):
+                    w = self._engine_widgets.get(k)
+                    raw = w.get() if w else ""
+                    if not raw: return default
+                    try: return cast(raw)
+                    except: return default
+                enabled = [mid for mid in _engine_cfg.MODEL_IDS if _ev("model_"+mid)]
+                vo = self._engine_vars.get("execution_mode")
+                sm = self._engine_vars.get("single_model_id")
+                em = self._engine_vars.get("ensemble_method")
+                mset = {
+                    "enabled_models": enabled or _engine_cfg.MODEL_IDS[:4],
+                    "execution_mode": vo.get() if vo else "all",
+                    "single_model_id": sm.get() if sm else "LightGBM",
+                    "ensemble_method": em.get() if em else "ic_weighted_average",
+                    "winsorization": _ev("winsorization", True),
+                    "rank_normalization": _ev("rank_normalization", True),
+                    "sector_neutralization": _ev("sector_neutralization", True),
+                    "lookback_days": _ew("lookback_days", 252),
+                    "training_window_years": _ew("training_window_years", 3),
+                    "retraining_frequency_months": _ew("retraining_frequency_months", 3),
+                    "n_estimators": _ew("n_estimators", 500),
+                    "max_depth": _ew("max_depth", 5),
+                    "learning_rate": _ew("learning_rate", 0.03, float),
+                    "ridge_alpha": _ew("ridge_alpha", 10.0, float),
+                    "winsorize_quantile": _ew("winsorize_quantile", 0.02, float),
+                }
+                _engine_cfg.set_system_config(_engine_cfg.DOMAIN_MODEL, mset)
+                fset = {gname: _ev("feat_"+gname, True) for gname in _engine_cfg.FEATURE_GROUPS}
+                _engine_cfg.set_system_config(_engine_cfg.DOMAIN_FEATURE, fset)
+            except Exception as ex:
+                messagebox.showwarning("Engine config", f"Engine settings may not have saved: {ex}")
         self._update_engine()
         messagebox.showinfo("OK","Settings saved!")
 
