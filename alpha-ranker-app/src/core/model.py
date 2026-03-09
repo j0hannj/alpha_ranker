@@ -183,8 +183,8 @@ def _make_lstm_regressor(n_features, units=64, dropout=0.2, epochs=50, lr=1e-3):
     class _LSTM(nn.Module):
         def __init__(self):
             super().__init__()
-            self.lstm = nn.LSTM(n_features, units, batch_first=True, dropout=dropout if dropout and dropout > 0 else 0)
-            self.drop = nn.Dropout(dropout or 0)
+            self.lstm = nn.LSTM(n_features, units, batch_first=True, dropout=0)
+            self.drop = nn.Dropout(dropout if dropout else 0)
             self.fc = nn.Linear(units, 1)
 
         def forward(self, x):

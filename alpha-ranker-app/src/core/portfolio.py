@@ -79,11 +79,10 @@ def add(ticker, name, typ, units, avg_price, currency, sector=None, sectors_json
     entry_date = entry_date or datetime.now().strftime("%Y-%m-%d")
     c.execute("""INSERT INTO holdings (ticker,isin,name,type,units,avg_price,current_price,currency,sector,sectors_json,
         strategy_type,asset_type,entry_price,entry_date,confidence,alpha_score,expected_return,target_price,stop_loss,
-        holding_horizon_days,transaction_cost,review_date)
-        holding_horizon_days,transaction_cost,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        holding_horizon_days,transaction_cost,status,review_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker, isin, name, typ, units, avg_price, avg_price, currency, sector, sectors_json,
          strategy_type, typ, avg_price, entry_date, confidence, alpha_score, expected_return, target_price, stop_loss,
-         holding_horizon_days, transaction_cost, "OPEN"))
+         holding_horizon_days, transaction_cost, "OPEN", review_date))
     c.commit(); c.close()
 
 def update(hid, **kwargs):

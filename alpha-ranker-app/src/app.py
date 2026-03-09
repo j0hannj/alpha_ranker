@@ -1049,6 +1049,23 @@ class AlphaRanker(ctk.CTk):
             self._sett[k]=e
             ctk.CTkLabel(scroll,text=hint,font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
             row+=1
+        # Investment horizon (per strategy type, max holding, review frequency)
+        if _engine_cfg:
+            ps = _engine_cfg.get_portfolio_settings()
+            ctk.CTkLabel(scroll,text="Investment horizon (per strategy)",font=("",15,"bold")).grid(row=row,column=0,columnspan=3,sticky="w",pady=(12,8)); row+=1
+            for k,l,d,hint in [
+                ("horizon_short_term_days","SHORT_TERM horizon (days)","60","30-90 typical"),
+                ("horizon_medium_term_days","MEDIUM_TERM horizon (days)","180","90-365 typical"),
+                ("horizon_long_term_days","LONG_TERM horizon (days)","365","Multi-year"),
+                ("max_holding_duration_days","Max holding duration (days)","730","Cap exit by date"),
+                ("review_frequency_days","Review frequency (days)","30","Next review date step"),
+            ]:
+                ctk.CTkLabel(scroll,text=l,font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+                e=ctk.CTkEntry(scroll,width=120,font=("JetBrains Mono",10))
+                e.grid(row=row,column=1,sticky="w",pady=3); e.insert(0,str(ps.get(k,d)))
+                self._sett[k]=e
+                ctk.CTkLabel(scroll,text=hint,font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
+                row+=1
 
         # Engine / Model configuration (DB-backed)
         if _engine_cfg:
@@ -1174,6 +1191,20 @@ class AlphaRanker(ctk.CTk):
                 _engine_cfg.set_system_config(_engine_cfg.DOMAIN_FEATURE, fset)
             except Exception as ex:
                 messagebox.showwarning("Engine config", f"Engine settings may not have saved: {ex}")
+            # Persist investment horizon (portfolio_settings)
+            try:
+                ps = _engine_cfg.get_portfolio_settings()
+                for k in ("horizon_short_term_days", "horizon_medium_term_days", "horizon_long_term_days",
+                          "max_holding_duration_days", "review_frequency_days"):
+                    e = self._sett.get(k)
+                    if e is not None:
+                        raw = e.get()
+                        if raw:
+                            try: ps[k] = int(raw)
+                            except ValueError: pass
+                _engine_cfg.set_system_config(_engine_cfg.DOMAIN_PORTFOLIO, ps)
+            except Exception:
+                pass
         self._update_engine()
         messagebox.showinfo("OK","Settings saved!")
 
