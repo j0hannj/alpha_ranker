@@ -790,10 +790,17 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
                 "per_horizon": {},
             },
         }
+        base = 1.0 + float(r_H)
         for m in horizons:
             if m <= 0:
                 continue
-            factor = (1 + r_H) ** (m / H)
+            if base <= 0:
+                factor = 0.0
+            else:
+                factor = base ** (m / H)
+                if isinstance(factor, complex):
+                    factor = 0.0
+            factor = float(factor)
             projected_price = cp * factor
             proj["horizons"][f"{m}M"] = {
                 "price": round(projected_price, 2),
