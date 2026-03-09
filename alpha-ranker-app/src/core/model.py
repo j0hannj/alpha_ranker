@@ -535,6 +535,17 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     if winsorize:
         X = _apply_winsorization(X, feat_cols, winsorize_q)
     X = rank_features(X, feat_cols)  # Same transform as training
+    # Sector neutralization (mirror training pipeline)
+    if config.get("sector_neutralization", True) and "sector" in df.columns:
+        X_neut = X.copy()
+        X_neut["sector"] = df["sector"].values
+        X_neut = sector_neutralize(X_neut, feat_cols, "sector")
+        X = X_neut.drop(columns=["sector"], errors="ignore")
+    # Feature decorrelation (mirror training pipeline; re-fit on current X, TODO: reuse fitted from training)
+    if config.get("feature_decorrelation"):
+        method = config.get("decorrelation_method", "pca")
+        var_ratio = float(config.get("pca_variance_ratio", 0.95))
+        X, _ = decorrelate_features(X, feat_cols, method=method, variance_ratio=var_ratio)
     n_models = sum(1 for info in models_dict.values() if info.get("model") is not None)
     preds, blend = predict_ensemble(models_dict, X, method=ensemble_method, return_per_model=(n_models > 1))
 
@@ -556,14 +567,15 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
         score_col="alpha_score_raw",
         sector_col="sector"
     )
-    df["predicted_return_pct"] = (df["alpha_score"]*100).round(2)
+    # predicted_return_pct must use raw score (return space); alpha_score is z-score for ranking only
+    df["predicted_return_pct"] = (df["alpha_score_raw"]*100).round(2)
     df = df.sort_values("alpha_score",ascending=False).reset_index(drop=True)
     df["alpha_rank"] = range(1,len(df)+1)
     df["rank"] = df["alpha_rank"]  # backward compat
 
-    # Confidence = z-score of alpha
-    med,std = np.median(preds),np.std(preds)
-    df["confidence"] = ((df["alpha_score"]-med)/std).round(2) if std>0 else 0
+    # Confidence = z-score of raw prediction (same scale as predicted_return_pct)
+    med, std = np.median(preds), np.std(preds)
+    df["confidence"] = ((preds - med) / std).round(2) if std > 0 else 0
     # Reliability: combine alpha, confidence, and model agreement (prioritize high agreement)
     ar, cr = df["alpha_score"], df["confidence"]
     a_norm = (ar - ar.min()) / (ar.max() - ar.min() + 1e-9)
@@ -898,7 +910,8 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         score_col="alpha_score_raw",
         sector_col="sector"
     )
-    df["predicted_return_pct"] = (df["alpha_score"]*100).round(2)
+    # predicted_return_pct must use raw score (return space); alpha_score is z-score for ranking only
+    df["predicted_return_pct"] = (df["alpha_score_raw"]*100).round(2)
     df=df.sort_values("alpha_score",ascending=False).reset_index(drop=True)
     df["alpha_rank"]=range(1,len(df)+1); df["rank"]=df["alpha_rank"]
     med,std=np.median(preds),np.std(preds)
