@@ -627,11 +627,11 @@ class AlphaRanker(ctk.CTk):
         ctk.CTkButton(hdr,text="Ask AI to Adjust",width=140,height=26,font=("",10),
                       fg_color="#312e81",hover_color="#3730a3",command=self._ai_overlay).pack(side="right",padx=5)
 
-        # Row 3: Proposal table (price, units, invested_amount, confidence, alpha_score)
-        cols=("src","ticker","name","sector","alpha","conf","price","alloc","shares","cost","reason")
+        # Row 3: Proposal table (price, units, invested_amount, confidence, alpha_score, holding_period, target, stop_loss, consensus)
+        cols=("src","ticker","name","sector","alpha","conf","price","alloc","shares","horizon","target","stop","consensus","reason")
         self.bld_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["Src","Ticker","Name","Sector","Alpha","Conf","Price","Invested","Qty","Cost","Reason"],
-                          [35,55,110,82,58,42,58,68,38,58,180]):
+        for c,h,w in zip(cols,["Src","Ticker","Name","Sector","Alpha","Conf","Price","Invested","Qty","Horizon","Target","Stop","Consensus","Reason"],
+                          [35,55,100,70,50,40,52,62,36,52,52,52,52,140]):
             self.bld_tree.heading(c,text=h); self.bld_tree.column(c,width=w,anchor="w" if c in ("name","reason","sector") else "e")
         self.bld_tree.grid(row=3,column=0,sticky="nsew")
         self.bld_tree.tag_configure("etf",foreground="#818cf8")
@@ -699,7 +699,8 @@ class AlphaRanker(ctk.CTk):
             alpha=p.get("alpha_score")
             alpha_str=f"+{alpha*100:.1f}%" if alpha is not None else p.get("alpha_score","-")
             if isinstance(alpha_str,(int,float)): alpha_str=f"+{float(alpha_str)*100:.1f}%" if alpha_str is not None else "-"
-            strat="LONG_TERM" if p.get("src")=="ETF" else "SHORT_TERM"
+            strat=p.get("strategy_type") or ("LONG_TERM" if p.get("src")=="ETF" else "SHORT_TERM")
+            holding_days=p.get("expected_holding_period") or p.get("holding_horizon") or horizon_days
             proposals.append({
                 "src":p.get("src","?"),
                 "ticker":p["ticker"],
@@ -708,7 +709,7 @@ class AlphaRanker(ctk.CTk):
                 "alpha_score":alpha_str,
                 "alpha_score_num":p.get("alpha_score"),
                 "confidence":p.get("confidence"),
-                "price":p.get("price"),
+                "price":p.get("price") or p.get("current_price"),
                 "alloc":inv,
                 "shares":units,
                 "reason":p.get("reason","")[:40],
@@ -717,7 +718,10 @@ class AlphaRanker(ctk.CTk):
                 "target_price":p.get("target_price"),
                 "stop_loss":p.get("stop_loss"),
                 "holding_horizon":p.get("holding_horizon",horizon_days),
-                "strategy_type":p.get("strategy_type",strat),
+                "expected_holding_period":holding_days,
+                "strategy_type":strat,
+                "review_date":p.get("review_date"),
+                "model_consensus_score":p.get("model_consensus_score"),
             })
         self._show_proposals(proposals,budget,fees)
         self.bld_ai_status.configure(text="Quant engine done. Click 'Ask AI' for adjustments.")
@@ -802,10 +806,15 @@ class AlphaRanker(ctk.CTk):
             conf=p.get("confidence")
             conf_str=f"{conf:.2f}" if conf is not None and _ok(conf) else "-"
             price_str=f"{price:,.2f}" if price is not None and _ok(price) else "-"
+            horizon=p.get("expected_holding_period") or p.get("holding_horizon")
+            horizon_str=f"{horizon}d" if horizon is not None else "-"
+            target=p.get("target_price"); target_str=f"{target:,.2f}" if target is not None and _ok(target) else "-"
+            stop=p.get("stop_loss"); stop_str=f"{stop:,.2f}" if stop is not None and _ok(stop) else "-"
+            consensus=p.get("model_consensus_score"); consensus_str=f"{consensus:.2f}" if consensus is not None and _ok(consensus) else "-"
             src=p.get("src","?")
             tag="etf" if src=="ETF" else "ai" if src=="AI" else "stock"
             self.bld_tree.insert("","end",values=(src,tk,p.get("name","")[:22],
-                p.get("sector","")[:14],alpha,conf_str,price_str,f"{alloc:,.0f}",shares,f"{cost:,.0f}",
+                p.get("sector","")[:14],alpha,conf_str,price_str,f"{alloc:,.0f}",shares,horizon_str,target_str,stop_str,consensus_str,
                 p.get("reason","")[:40]),tags=(tag,))
         self.bld_summary.configure(
             text=f"Total: {total:,.0f} EUR ({n} trades, {n*fees:.0f} fees) | Budget: {budget:,.0f} EUR | "
@@ -834,6 +843,7 @@ class AlphaRanker(ctk.CTk):
             else:
                 typ="etf" if p.get("src")=="ETF" or any(x in tk.upper() for x in ["IWDA","VWCE","QQQ","SPY","VTI"]) else "stock"
                 strat=p.get("strategy_type") or ("LONG_TERM" if typ=="etf" else "SHORT_TERM")
+                holding_days=p.get("expected_holding_period") or p.get("holding_horizon")
                 portfolio.add(tk,p.get("name",tk),typ,shares,round(float(price),2),"EUR",
                     strategy_type=strat,
                     confidence=p.get("confidence"),
@@ -841,8 +851,9 @@ class AlphaRanker(ctk.CTk):
                     expected_return=p.get("expected_return"),
                     target_price=p.get("target_price"),
                     stop_loss=p.get("stop_loss"),
-                    holding_horizon_days=p.get("holding_horizon"),
-                    transaction_cost=p.get("transaction_cost"))
+                    holding_horizon_days=holding_days,
+                    transaction_cost=p.get("transaction_cost"),
+                    review_date=p.get("review_date"))
             added+=1
         self._refresh_display()
         self.bld_summary.configure(text=f"Added {added} positions to portfolio!")
@@ -853,13 +864,13 @@ class AlphaRanker(ctk.CTk):
         remaining=[]
         for item in self.bld_tree.get_children():
             vals=self.bld_tree.item(item,"values")
-            # cols: src,ticker,name,sector,alpha,conf,price,alloc,shares,cost,reason
+            # cols: src,ticker,name,sector,alpha,conf,price,alloc,shares,horizon,target,stop,consensus,reason
             try: alloc=int(float(str(vals[7]).replace(",","")))
             except: alloc=0
             try: shares=int(vals[8])
             except: shares=0
             remaining.append({"src":vals[0],"ticker":vals[1],"name":vals[2],"sector":vals[3],
-                             "alpha_score":vals[4],"alloc":alloc,"shares":shares,"reason":vals[10]})
+                             "alpha_score":vals[4],"alloc":alloc,"shares":shares,"reason":vals[13]})
         self._build_proposals=remaining
 
     # ── PROJECTIONS TAB ───────────────────────────────────────

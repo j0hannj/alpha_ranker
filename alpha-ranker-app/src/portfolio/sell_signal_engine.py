@@ -43,7 +43,9 @@ def evaluate_sell_signals(
     current_price: Optional[float] = None,
     current_confidence: Optional[float] = None,
     current_alpha_score: Optional[float] = None,
+    current_model_consensus: Optional[float] = None,
     confidence_deterioration_threshold: float = 0.5,
+    model_consensus_negative_threshold: float = 0.0,
 ) -> List[SellAlert]:
     """
     Evaluate one holding and return a list of sell alerts (one per triggered condition).
@@ -51,6 +53,8 @@ def evaluate_sell_signals(
     holding: dict with entry_price/avg_price, target_price, stop_loss,
              holding_horizon_days, entry_date/added_at, confidence, alpha_score, units, etc.
     current_price: if None, use holding['current_price'] or holding['avg_price'].
+    current_model_consensus: reliability_score or model_agreement_score from current model run;
+                             sell when this is below model_consensus_negative_threshold (e.g. 0 = negative).
     """
     alerts: List[SellAlert] = []
     entry = holding.get("entry_price") or holding.get("avg_price") or 0
@@ -136,6 +140,18 @@ def evaluate_sell_signals(
             return_pct=ret_pct,
             alpha_score=current_alpha_score,
         ))
+        return alerts
+
+    # 6. Model consensus turns negative (reliability / agreement below threshold)
+    if current_model_consensus is not None and current_model_consensus < model_consensus_negative_threshold:
+        alerts.append(SellAlert(
+            ticker=ticker,
+            reason="Model consensus turned negative",
+            entry_price=entry,
+            current_price=price,
+            return_pct=ret_pct,
+            extra={"model_consensus_score": current_model_consensus},
+        ))
 
     return alerts
 
@@ -168,7 +184,7 @@ def get_all_sell_alerts(
     for h in holdings:
         if only_open and (h.get("status") or "OPEN") != "OPEN":
             continue
-        conf = alpha = None
+        conf = alpha = consensus = None
         if model_results is not None and not model_results.empty and "ticker" in model_results.columns:
             m = model_results[model_results["ticker"] == h["ticker"]]
             if not m.empty:
@@ -182,6 +198,12 @@ def get_all_sell_alerts(
                         a = float(a) / 100.0
                 if pd.notna(a):
                     alpha = float(a)
-        alerts = evaluate_sell_signals(h, current_confidence=conf, current_alpha_score=alpha)
+                for col in ("reliability_score", "model_agreement_score", "model_consensus_score"):
+                    if col in m.columns and pd.notna(m.iloc[0].get(col)):
+                        consensus = float(m.iloc[0][col])
+                        break
+        alerts = evaluate_sell_signals(
+            h, current_confidence=conf, current_alpha_score=alpha, current_model_consensus=consensus
+        )
         out.extend(alerts)
     return out

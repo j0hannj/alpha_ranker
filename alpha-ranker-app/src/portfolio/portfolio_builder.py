@@ -174,6 +174,14 @@ def build_suggested_portfolio(
             target_price = round(price * (1 + expected_return_frac), 2) if expected_return_frac else None
             stop_pct = default_stop_loss_pct / 100.0
             stop_loss = round(price * (1 - stop_pct), 2) if price else None
+            strategy_type = strategy_type_from_horizon(horizon)
+            review_date = (datetime.now() + timedelta(days=review_frequency_days)).strftime("%Y-%m-%d")
+            model_consensus_score = None
+            if not row.empty:
+                for col in ("reliability_score", "model_agreement_score"):
+                    if col in row.columns and pd.notna(row.iloc[0].get(col)):
+                        model_consensus_score = round(float(row.iloc[0][col]), 3)
+                        break
             p["src"] = "Model"
             p["name"] = name[:22] if isinstance(name, str) else str(name)[:22]
             p["sector"] = sector[:14] if isinstance(sector, str) else ""
@@ -183,6 +191,13 @@ def build_suggested_portfolio(
             p["target_price"] = target_price
             p["stop_loss"] = stop_loss
             p["holding_horizon"] = horizon
+            p["expected_holding_period"] = horizon
+            p["strategy_type"] = strategy_type
+            p["review_date"] = review_date
+            p["model_consensus_score"] = model_consensus_score
+            p["current_price"] = price
+            p["units_to_buy"] = units
+            p["investment_amount"] = invested
             p["reason"] = f"Rank signal, confidence {p.get('confidence'):.2f}" if p.get("confidence") is not None else "Rank signal"
             out.append(p)
 
