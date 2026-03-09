@@ -10,12 +10,30 @@ Ensemble: LightGBM + XGBoost + Ridge + RandomForest
 Combination: OOS-IC-weighted average
 Output: alpha_score, alpha_rank per ticker
 """
-import os, json, pickle, warnings
+import os, json, pickle, random, warnings
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 from scipy import stats
+
+GLOBAL_SEED = 42
+
+
+def set_global_seed(seed=None):
+    """Set all random seeds for reproducibility. Call at start of pipeline when deterministic_mode is True."""
+    s = seed if seed is not None else GLOBAL_SEED
+    np.random.seed(s)
+    random.seed(s)
+    try:
+        import torch
+        torch.manual_seed(s)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(s)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except ImportError:
+        pass
 
 # New modular imports (refactored architecture)
 from features.fundamental_features import get_fundamentals_asof, build_features_asof
@@ -245,30 +263,35 @@ def _make_lstm_regressor(n_features, units=64, dropout=0.2, epochs=50, lr=1e-3, 
 
 
 def _get_models(config=None):
-    """Build model dict. If config provided, only enabled_models are included. TCN/LSTM added only if torch available."""
+    """Build model dict. If config provided, only enabled_models are included. deterministic_mode -> n_jobs=1 for reproducibility."""
     from lightgbm import LGBMRegressor
     from xgboost import XGBRegressor
     from sklearn.linear_model import Ridge, ElasticNet
     from sklearn.ensemble import RandomForestRegressor
     n_est = 500; depth = 5; lr = 0.03
     ridge_alpha = 10.0
+    det = config.get("deterministic_mode", False) if config else False
+    n_jobs = 1 if det else -1
     if config:
         n_est = config.get("n_estimators", n_est)
         depth = config.get("max_depth", depth)
         lr = config.get("learning_rate", lr)
         ridge_alpha = config.get("ridge_alpha", ridge_alpha)
+    lgb_kw = dict(n_estimators=n_est,max_depth=depth,learning_rate=lr,
+        subsample=0.7,colsample_bytree=0.6,min_child_samples=15,
+        reg_alpha=0.3,reg_lambda=0.3,random_state=42,verbose=-1,n_jobs=n_jobs)
+    if det:
+        lgb_kw["deterministic"] = True
     all_models = {
-        "LightGBM": LGBMRegressor(n_estimators=n_est,max_depth=depth,learning_rate=lr,
-            subsample=0.7,colsample_bytree=0.6,min_child_samples=15,
-            reg_alpha=0.3,reg_lambda=0.3,random_state=42,verbose=-1,n_jobs=-1),
+        "LightGBM": LGBMRegressor(**lgb_kw),
         "XGBoost": XGBRegressor(n_estimators=n_est,max_depth=depth,learning_rate=lr,
             subsample=0.7,colsample_bytree=0.6,min_child_weight=15,
-            reg_alpha=0.3,reg_lambda=0.3,random_state=42,verbosity=0,n_jobs=-1),
+            reg_alpha=0.3,reg_lambda=0.3,random_state=42,verbosity=0,n_jobs=n_jobs),
         "Ridge": Ridge(alpha=ridge_alpha),
         "ElasticNet": ElasticNet(alpha=config.get("elastic_net_alpha",1.0) if config else 1.0,
             l1_ratio=config.get("elastic_net_l1_ratio",0.5) if config else 0.5),
         "RandomForest": RandomForestRegressor(n_estimators=min(300,n_est),max_depth=min(8,depth),
-            min_samples_leaf=15,max_features=0.6,random_state=42,n_jobs=-1),
+            min_samples_leaf=15,max_features=0.6,random_state=42,n_jobs=n_jobs),
     }
     # TCN / LSTM: require PyTorch and n_features (set at first fit in walk_forward)
     _torch_available = False
@@ -356,8 +379,8 @@ def _get_feature_importance(models_dict, feat_cols):
 # WALK-FORWARD BACKTESTING
 # ══════════════════════════════════════════════════════════════
 def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
-                       start_year=2019, horizon_months=12, callback=None, config=None):
-    """Walk-forward with ensemble. Uses config from DB if not provided (enabled_models, ensemble_method, winsorization)."""
+                       start_year=2019, horizon_months=12, callback=None, config=None, as_of_date=None):
+    """Walk-forward with ensemble. Uses config from DB if not provided. as_of_date: fix date for reproducibility (default: last price date)."""
     try:
         from core.engine_config import get_model_settings, get_feature_settings, get_enabled_feature_columns
     except Exception:
@@ -366,6 +389,8 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         config = get_model_settings()
     if config is None:
         config = {}
+    if config.get("deterministic_mode", False):
+        set_global_seed(config.get("global_seed", GLOBAL_SEED))
     try:
         from core.engine_config import MODEL_IDS
     except Exception:
@@ -377,8 +402,21 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         sid = config.get("single_model_id", "LightGBM")
         config = {**config, "enabled_models": [sid] if sid in (MODEL_IDS if isinstance(MODEL_IDS, list) else list(MODEL_IDS)) else ["LightGBM"]}
     H = config.get("prediction_horizon_months", horizon_months)
-    rebal_dates = [datetime(y,m,1) for y in range(start_year,datetime.now().year+1)
-                   for m in [1,4,7,10] if datetime(y,m,1) < datetime.now()-timedelta(days=H*30)]
+    ref_date = as_of_date
+    if ref_date is None and prices is not None and hasattr(prices, "index") and len(prices.index) > 0:
+        try:
+            ref_date = prices.index[-1]
+            if hasattr(ref_date, "to_pydatetime"):
+                ref_date = ref_date.to_pydatetime()
+            elif not isinstance(ref_date, datetime):
+                ref_date = datetime(ref_date.year, getattr(ref_date, "month", 1), getattr(ref_date, "day", 1))
+        except Exception:
+            ref_date = datetime.now()
+    if ref_date is None:
+        ref_date = datetime.now()
+    cutoff = ref_date - timedelta(days=H*30)
+    rebal_dates = [datetime(y,m,1) for y in range(start_year, ref_date.year+1)
+                   for m in [1,4,7,10] if datetime(y,m,1) < cutoff]
     if callback: callback(f"Walk-forward: {len(rebal_dates)} periods")
     all_periods = []; meta_cols = ["ticker","date","sector","name","forward_return"]
     for i,rd in enumerate(rebal_dates):
@@ -441,15 +479,13 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         models = _get_models(config)
         for name,m in models.items():
             try:
-                m.fit(Xtr_r,ytr); p=m.predict(Xte_r)
+                m.fit(Xtr_r,ytr)
+                p = m.predict(Xte_r)
                 ic = stats.spearmanr(p,yte.values)[0] if len(yte)>5 else 0
                 per_model_oos.setdefault(name, []).append(ic)
-            except: per_model_oos.setdefault(name, []).append(0)
-        ens = {n:{"model":m,"ic":np.mean(per_model_oos.get(n,[])) or 0.01}
-               for n,m in models.items()}
-        for n,m in models.items():
-            try: m.fit(Xtr_r,ytr); ens[n]["model"]=m
-            except: pass
+            except Exception:
+                per_model_oos.setdefault(name, []).append(0)
+        ens = {n: {"model": m, "ic": np.mean(per_model_oos.get(n,[])) or 0.01} for n, m in models.items()}
         ep,_ = predict_ensemble(ens,Xte_r, method=ensemble_method if isinstance(ensemble_method, str) else "ic_weighted_average")
         for j,(idx,row) in enumerate(tst.iterrows()):
             oos_preds.append({"ticker":row["ticker"],"period":int(tp),"predicted":ep[j],"actual":row["forward_return"]})
@@ -509,8 +545,8 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
 # CURRENT PREDICTIONS → ALPHA SCORE + RANK
 # ══════════════════════════════════════════════════════════════
 def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
-                    macro, sector_map, tickers, yf_info=None, callback=None, config=None):
-    """Generate current alpha scores and ranks using the trained ensemble. Uses config for ensemble_method and winsorization."""
+                    macro, sector_map, tickers, yf_info=None, callback=None, config=None, as_of_date=None):
+    """Generate current alpha scores and ranks using the trained ensemble. as_of_date: use last price date when set for reproducibility."""
     if config is None:
         try:
             from core.engine_config import get_model_settings
@@ -520,8 +556,20 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     ensemble_method = config.get("ensemble_method") or "ic_weighted_average"
     winsorize = config.get("winsorization", False)
     winsorize_q = config.get("winsorize_quantile", 0.02)
+    ref_date = as_of_date
+    if ref_date is None and prices is not None and hasattr(prices, "index") and len(prices.index) > 0:
+        try:
+            ref_date = prices.index[-1]
+            if hasattr(ref_date, "to_pydatetime"):
+                ref_date = ref_date.to_pydatetime()
+            elif not isinstance(ref_date, datetime):
+                ref_date = datetime(ref_date.year, getattr(ref_date, "month", 1), getattr(ref_date, "day", 1))
+        except Exception:
+            ref_date = datetime.now()
+    if ref_date is None:
+        ref_date = datetime.now()
     if callback: callback("Generating alpha scores...")
-    df = build_features_asof(prices,fundamentals_db,macro,datetime.now(),tickers)
+    df = build_features_asof(prices,fundamentals_db,macro,ref_date,tickers)
     df = add_sector_interactions(df,sector_map)
     if yf_info:
         df["sector"] = df["ticker"].map(lambda t: yf_info.get(t,{}).get("sector","Unknown"))
@@ -855,6 +903,13 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
 # ══════════════════════════════════════════════════════════════
 def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores=None):
     """Degraded mode: technical + sentiment features, ensemble, rank+neutralize."""
+    try:
+        from core.engine_config import get_model_settings
+        cfg = get_model_settings()
+        if cfg and cfg.get("deterministic_mode", False):
+            set_global_seed(cfg.get("global_seed", GLOBAL_SEED))
+    except Exception:
+        pass
     if callback: callback("Simple ensemble: technical + sentiment...")
     records = []
     for ticker,fund in yf_fundamentals.items():
@@ -975,7 +1030,7 @@ def detect_market_regime(prices, macro=None, regime_config=None):
 # ══════════════════════════════════════════════════════════════
 def run_full_pipeline(callback=None):
     """Main entry. Fetches all data, trains ensemble, generates alpha rankings.
-    Returns (results_df, feature_importance, model_info, macro)."""
+    Returns (results_df, feature_importance, model_info, macro). Uses as_of_date=last price date when deterministic_mode for reproducibility."""
     from .data import fetch_all_data
     alldata = fetch_all_data(callback=callback)
     tickers = alldata["tickers"]; prices = alldata["prices"]
@@ -983,6 +1038,16 @@ def run_full_pipeline(callback=None):
     sentiment = alldata.get("sentiment",{})
     sector_map = {t:f.get("sector","Unknown") for t,f in yf_fund.items()}
     fmp_key = os.environ.get("FMP_API_KEY")
+    as_of_date = None
+    if prices is not None and hasattr(prices, "index") and len(prices.index) > 0:
+        try:
+            as_of_date = prices.index[-1]
+            if hasattr(as_of_date, "to_pydatetime"):
+                as_of_date = as_of_date.to_pydatetime()
+            elif not isinstance(as_of_date, datetime):
+                as_of_date = datetime(as_of_date.year, getattr(as_of_date, "month", 1), getattr(as_of_date, "day", 1))
+        except Exception:
+            pass
 
     if fmp_key:
         if callback: callback("Full mode: FMP + walk-forward ensemble")
@@ -990,13 +1055,15 @@ def run_full_pipeline(callback=None):
             from core.engine_config import get_model_settings, init_default_config
             init_default_config()
             config = get_model_settings()
+            if config and config.get("deterministic_mode", False):
+                set_global_seed(config.get("global_seed", GLOBAL_SEED))
         except Exception:
             config = {}
         fund_db = fetch_all_fundamentals(list(yf_fund.keys()),fmp_key,callback)
         if len(fund_db)<30:
             return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"))
         wf = walk_forward_train(prices,fund_db,macro,sector_map,list(fund_db.keys()),
-                               start_year=2019,callback=callback,config=config)
+                               start_year=2019,callback=callback,config=config,as_of_date=as_of_date)
         if wf[0] is None:
             return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"))
         final_models,medians,feat_cols,feat_imp,oos_metrics = wf
@@ -1007,7 +1074,7 @@ def run_full_pipeline(callback=None):
                 final_models = {single_id: final_models[single_id]}
         results,blend = predict_current(final_models,medians,feat_cols,prices,fund_db,
                                         macro,sector_map,list(yf_fund.keys()),
-                                        yf_info=yf_fund,callback=callback,config=config)
+                                        yf_info=yf_fund,callback=callback,config=config,as_of_date=as_of_date)
         if sentiment: results["news_sentiment"]=results["ticker"].map(sentiment).fillna(0)
         H = (config or {}).get("prediction_horizon_months", 12)
         model_info = {"mode":"walk_forward_ensemble","n_features":len(feat_cols),"blend":blend,"prediction_horizon_months":H,**oos_metrics}

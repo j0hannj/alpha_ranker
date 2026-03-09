@@ -74,6 +74,8 @@ DEFAULT_MODEL_SETTINGS = {
     "horizon_weight_6m": 0.2,
     "horizon_weight_12m": 0.5,
     "horizon_weight_24m": 0.2,
+    "deterministic_mode": True,
+    "global_seed": 42,
 }
 
 DEFAULT_FEATURE_SETTINGS = {
