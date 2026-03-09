@@ -23,6 +23,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from scipy import stats
 
+# New modular imports (refactored architecture)
+from features.fundamental_features import get_fundamentals_asof, build_features_asof
+from features.price_features import compute_forward_return
+from features.cross_sectional import (
+    rank_features,
+    sector_neutralize,
+    factor_neutralize_scores,
+    add_sector_interactions,
+)
+
 warnings.filterwarnings("ignore")
 CACHE_DIR = Path(__file__).parent.parent.parent / "db"
 CACHE_DIR.mkdir(exist_ok=True)
@@ -85,205 +95,6 @@ def fetch_all_fundamentals(tickers, api_key, callback=None):
     FUNDAMENTALS_CACHE.write_text(json.dumps({**data,"_date":datetime.now().isoformat()},default=str),encoding="utf-8")
     if callback: callback(f"FMP: {len(data)} tickers loaded")
     return data
-
-# ══════════════════════════════════════════════════════════════
-# FEATURE ENGINEERING (point-in-time)
-# ══════════════════════════════════════════════════════════════
-def get_fundamentals_asof(ticker_data, as_of_date):
-    """Get MOST RECENT fundamentals filed BEFORE as_of_date. Enforces temporal consistency."""
-    as_of = pd.Timestamp(as_of_date)
-    valid = [r for r in ticker_data if pd.Timestamp(r["filing_date"]) <= as_of]
-    if not valid: return None
-    latest = valid[-1]
-    last_4 = valid[-4:] if len(valid)>=4 else valid
-    ttm = {}
-    for f in ["revenue","net_income","ebitda"]:
-        vals = [r[f] for r in last_4 if r.get(f) is not None]
-        if vals: ttm[f"{f}_ttm"] = sum(vals)
-    if len(valid)>=8:
-        prev_4 = valid[-8:-4]
-        rn = sum(r["revenue"] for r in last_4 if r.get("revenue"))
-        rp = sum(r["revenue"] for r in prev_4 if r.get("revenue"))
-        if rp>0: ttm["revenue_growth_yoy"] = rn/rp-1
-        en = sum(r["eps"] for r in last_4 if r.get("eps"))
-        ep = sum(r["eps"] for r in prev_4 if r.get("eps"))
-        if ep!=0: ttm["eps_growth_yoy"] = en/ep-1
-    return {**latest, **ttm}
-
-def build_features_asof(prices, fundamentals_db, macro, as_of_date, tickers):
-    """Build feature matrix using ONLY data available at as_of_date."""
-    as_of = pd.Timestamp(as_of_date)
-    records = []
-    for ticker in tickers:
-        row = {"ticker":ticker, "date":str(as_of_date)}
-        # Fundamental features (point-in-time via filing date)
-        td = fundamentals_db.get(ticker)
-        if td:
-            fund = get_fundamentals_asof(td, as_of_date)
-            if fund:
-                for f in ["pe_ratio","pb_ratio","ev_ebitda","roe","debt_to_equity","current_ratio",
-                          "gross_margin","operating_margin","net_margin","peg_ratio","dividend_yield","fcf_per_share"]:
-                    row[f] = fund.get(f)
-                mcap = fund.get("market_cap")
-                if mcap and mcap>0: row["log_market_cap"] = np.log(mcap)
-                for f in ["revenue_ttm","net_income_ttm","revenue_growth_yoy","eps_growth_yoy"]:
-                    row[f] = fund.get(f)
-                if fund.get("fcf_per_share") and mcap and mcap>0:
-                    row["fcf_yield"] = fund["fcf_per_share"]*1e6/mcap
-        # Price/technical features (using data up to as_of only)
-        try:
-            if isinstance(prices.columns, pd.MultiIndex):
-                close = prices[(ticker,"Close")].dropna()
-                close = close[close.index <= as_of]
-            else: close = pd.Series()
-            if len(close)>=60:
-                cur = close.iloc[-1]
-                if len(close)>21: row["return_1m"] = cur/close.iloc[-21]-1
-                if len(close)>63: row["return_3m"] = cur/close.iloc[-63]-1
-                if len(close)>126: row["return_6m"] = cur/close.iloc[-126]-1
-                if len(close)>252:
-                    row["return_12m"] = cur/close.iloc[-252]-1
-                    row["momentum_12_1"] = close.iloc[-21]/close.iloc[-252]-1
-                daily = close.pct_change().dropna()
-                row["volatility_1m"] = daily.tail(21).std()*np.sqrt(252)
-                row["volatility_3m"] = daily.tail(63).std()*np.sqrt(252)
-                if len(daily)>252:
-                    row["volatility_12m"] = daily.tail(252).std()*np.sqrt(252)
-                    if row["volatility_12m"]>0: row["sharpe_12m"] = row.get("return_12m",0)/row["volatility_12m"]
-                ma50 = close.tail(50).mean()
-                if ma50>0: row["price_vs_ma50"] = cur/ma50-1
-                if len(close)>200:
-                    ma200 = close.tail(200).mean()
-                    if ma200>0: row["price_vs_ma200"] = cur/ma200-1
-                row["drawdown_from_high"] = cur/close.tail(min(252,len(close))).max()-1
-                row["distance_from_low"] = cur/close.tail(min(252,len(close))).min()-1
-        except: pass
-        # Macro features (contemporaneous)
-        if isinstance(macro, dict):
-            for k,v in macro.items():
-                if isinstance(v,(int,float)): row[f"macro_{k}"] = v
-        records.append(row)
-    return pd.DataFrame(records)
-
-# ══════════════════════════════════════════════════════════════
-# CROSS-SECTIONAL TRANSFORMS
-# ══════════════════════════════════════════════════════════════
-def rank_features(df, feat_cols):
-    """Cross-sectional rank transform: convert raw features to percentile ranks.
-    Standard in equity factor models — reduces outlier impact, makes features comparable."""
-    ranked = df.copy()
-    for c in feat_cols:
-        if c in ranked.columns and ranked[c].dtype in [np.float64,np.int64,float,int]:
-            ranked[c] = ranked[c].rank(pct=True, method="average")
-    return ranked
-
-def sector_neutralize(df, feat_cols, sector_col="sector"):
-    """Sector-neutralize features: subtract sector mean from each feature.
-    Ensures alpha is not just a sector bet."""
-    neutralized = df.copy()
-    if sector_col not in neutralized.columns:
-        return neutralized
-    for c in feat_cols:
-        if c in neutralized.columns and neutralized[c].dtype in [np.float64,np.int64,float,int]:
-            sector_mean = neutralized.groupby(sector_col)[c].transform("mean")
-            neutralized[c] = neutralized[c] - sector_mean
-    return neutralized
-
-
-def factor_neutralize_scores(df, score_col="alpha_score", factor_cols=None,
-                             sector_col="sector", min_obs=30):
-    """Cross-sectional factor neutralization of alpha scores.
-
-    Removes linear exposure of the alpha score to common risk factors
-    (e.g., size, momentum, volatility, sector dummies) via a single-step
-    cross-sectional regression and returns the residuals.
-    """
-    if score_col not in df.columns:
-        return df.get(score_col, pd.Series(index=df.index))
-
-    scores = df[score_col].astype(float)
-    valid_idx = scores.replace([np.inf, -np.inf], np.nan).notna()
-    if factor_cols is None:
-        # Default factor set based on typical equity risk factors.
-        default_candidates = [
-            "log_market_cap",      # size
-            "volatility_12m",      # risk
-            "momentum_12_1",       # momentum
-            "return_12m",          # trend/quality proxy
-            "dividend_yield",      # value / income
-        ]
-        factor_cols = [c for c in default_candidates
-                       if c in df.columns and df[c].dtype in [np.float64, np.int64, float, int]]
-
-    if not factor_cols:
-        # Nothing to neutralize against
-        return scores
-
-    X = df.loc[valid_idx, factor_cols].copy()
-    # Add sector dummies if available
-    if sector_col and sector_col in df.columns:
-        sec = df.loc[valid_idx, sector_col].astype(str)
-        dums = pd.get_dummies(sec, prefix="sec", drop_first=True)
-        if len(dums.columns) > 0:
-            X = pd.concat([X, dums], axis=1)
-
-    # Drop columns that are all NaN or constant
-    X = X.replace([np.inf, -np.inf], np.nan)
-    X = X.dropna(axis=1, how="all")
-    nunique = X.nunique(dropna=True)
-    X = X.loc[:, nunique > 1]
-
-    if X.shape[1] == 0 or valid_idx.sum() < max(min_obs, X.shape[1] + 1):
-        return scores
-
-    # Fill remaining NaNs with column medians
-    X = X.fillna(X.median())
-    # Standardize factors to stabilize regression
-    std = X.std(ddof=0).replace(0, 1)
-    X_std = (X - X.mean()) / std
-
-    y = scores.loc[valid_idx].values
-    try:
-        X_mat = np.column_stack([np.ones(len(X_std)), X_std.values])
-        beta, _, _, _ = np.linalg.lstsq(X_mat, y, rcond=None)
-        y_hat = X_mat @ beta
-        resid = y - y_hat
-        neutral_scores = scores.copy()
-        neutral_scores.loc[valid_idx] = resid
-        # Re-standardize residuals cross-sectionally for stability
-        mu, sigma = np.median(neutral_scores), np.std(neutral_scores)
-        if sigma > 0:
-            neutral_scores = (neutral_scores - mu) / sigma
-        return neutral_scores
-    except Exception:
-        # On failure, fall back to original scores
-        return scores
-
-def add_sector_interactions(df, sector_map):
-    """Add sector × macro interaction features."""
-    df["sector"] = df["ticker"].map(sector_map).fillna("Unknown")
-    it = df["sector"].isin(["Technology","Communication Services"]).astype(int)
-    ie = (df["sector"]=="Energy").astype(int)
-    id_ = df["sector"].isin(["Utilities","Consumer Staples","Health Care"]).astype(int)
-    iff = (df["sector"]=="Financials").astype(int)
-    fed = df.get("macro_fed_funds_rate",pd.Series(4.0,index=df.index))
-    oil = df.get("macro_oil_price",pd.Series(80,index=df.index))
-    vix = df.get("macro_vix",pd.Series(20,index=df.index))
-    df["tech_x_rates"]=it*fed; df["energy_x_oil"]=ie*oil
-    df["defensive_x_vix"]=id_*vix
-    df["financial_x_curve"]=iff*df.get("macro_yield_curve_slope",pd.Series(0,index=df.index))
-    return df
-
-def compute_forward_return(prices, ticker, from_date, months=12):
-    """Compute actual forward return. Target for supervised learning."""
-    try:
-        close = prices[(ticker,"Close")].dropna() if isinstance(prices.columns,pd.MultiIndex) else None
-        if close is None: return None
-        ft = pd.Timestamp(from_date); tt = ft + pd.DateOffset(months=months)
-        af = close[close.index>=ft]; at_ = close[close.index>=tt]
-        if len(af)==0 or len(at_)==0: return None
-        return at_.iloc[0]/af.iloc[0]-1 if af.iloc[0]>0 else None
-    except: return None
 
 # ══════════════════════════════════════════════════════════════
 # ENSEMBLE ENGINE
