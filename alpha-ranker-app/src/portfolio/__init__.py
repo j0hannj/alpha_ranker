@@ -1,18 +1,18 @@
 """
-Portfolio suggestion system for the quantitative investment application.
+Portfolio decision engine: suggestions, transaction costs, sell signals, and tracking.
 
-This package implements realistic portfolio construction that:
-- Filters recommendations by model confidence (LOW / MEDIUM / HIGH).
-- Allocates capital proportionally, then converts to integer shares using
-  current market prices so the total cost never exceeds the budget.
-
-Compatible with the existing alpha model pipeline (model_results DataFrame
-with columns: ticker, alpha_score, confidence, current_price, etc.).
+- Confidence filtering (LOW / MEDIUM / HIGH) and allocation with integer shares.
+- Transaction cost modeling: reject trades where expected_return < 3 × transaction_cost.
+- Sell signal engine: target reached, stop loss, horizon, confidence drop, negative alpha.
+- portfolio_database: strategy_type per asset, OPEN/SOLD status, full tracking fields.
 """
 
 from .confidence_filter import ConfidenceFilter, CONFIDENCE_THRESHOLDS
 from .allocation_engine import AllocationEngine
 from .portfolio_builder import PortfolioBuilder, build_suggested_portfolio
+from .transaction_cost_model import TransactionCostParams, estimate_transaction_cost, is_trade_economically_viable
+from .sell_signal_engine import evaluate_sell_signals, get_all_sell_alerts, SellAlert, format_sell_alert
+from .portfolio_database import get_open_positions, add_position, update_position, mark_sold, STRATEGY_TYPES
 
 __all__ = [
     "ConfidenceFilter",
@@ -20,4 +20,16 @@ __all__ = [
     "AllocationEngine",
     "PortfolioBuilder",
     "build_suggested_portfolio",
+    "TransactionCostParams",
+    "estimate_transaction_cost",
+    "is_trade_economically_viable",
+    "evaluate_sell_signals",
+    "get_all_sell_alerts",
+    "SellAlert",
+    "format_sell_alert",
+    "get_open_positions",
+    "add_position",
+    "update_position",
+    "mark_sold",
+    "STRATEGY_TYPES",
 ]

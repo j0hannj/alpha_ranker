@@ -214,11 +214,14 @@ class AlphaRanker(ctk.CTk):
         self.pf_tree.grid(row=1,column=0,sticky="nsew",padx=5,pady=5)
         self.pf_tree.bind("<Double-1>",self._edit_holding)
         self.pf_tree.tag_configure("pos",foreground="#34d399"); self.pf_tree.tag_configure("neg",foreground="#f87171")
-        # Right: sector + projection
+        # Right: sector + sell alerts + projection
         rp=ctk.CTkFrame(tab,corner_radius=10); rp.grid(row=1,column=1,sticky="nsew")
         ctk.CTkLabel(rp,text="Sector Exposure",font=("",12,"bold")).pack(padx=10,pady=6)
-        self.pf_sec=ctk.CTkTextbox(rp,font=("JetBrains Mono",10),state="disabled",fg_color="#09090b",height=110)
+        self.pf_sec=ctk.CTkTextbox(rp,font=("JetBrains Mono",10),state="disabled",fg_color="#09090b",height=90)
         self.pf_sec.pack(fill="x",padx=5,pady=3)
+        ctk.CTkLabel(rp,text="Sell Alerts",font=("",11,"bold"),text_color="#f87171").pack(padx=10,pady=(6,2))
+        self.pf_alerts=ctk.CTkTextbox(rp,font=("JetBrains Mono",9),state="disabled",fg_color="#09090b",height=85)
+        self.pf_alerts.pack(fill="x",padx=5,pady=3)
         ctk.CTkLabel(rp,text="DCA Projection",font=("",11,"bold")).pack(padx=10,pady=(8,2))
         self.pf_proj=ctk.CTkFrame(rp,fg_color="#09090b",corner_radius=8)
         self.pf_proj.pack(fill="both",expand=True,padx=5,pady=3)
@@ -250,6 +253,7 @@ class AlphaRanker(ctk.CTk):
             self.pf_sec.insert("end",f"{s['sector'][:18]:<18} {s['pct']:>5.1f}% {bar}\n")
         self.pf_sec.configure(state="disabled")
         self._portfolio_pnl=pnl
+        self._update_sell_alerts(h)
         self._draw_projection(pnl["total_value"])
         self._draw_value_chart(portfolio.get_all())
 
@@ -343,7 +347,7 @@ class AlphaRanker(ctk.CTk):
         for x in portfolio.get_all():
             if x["id"]==hid: h=x; break
         if not h: return
-        d=ctk.CTkToplevel(self); d.title(f"Edit {h['ticker']}"); d.geometry("350x300")
+        d=ctk.CTkToplevel(self); d.title(f"Edit {h['ticker']}"); d.geometry("380x380")
         d.grab_set(); d.attributes("-topmost",True)
         ctk.CTkLabel(d,text=f"Edit {h['ticker']}",font=("",16,"bold")).pack(pady=12)
         fr=ctk.CTkFrame(d,fg_color="transparent"); fr.pack(padx=20,fill="x")
@@ -353,16 +357,34 @@ class AlphaRanker(ctk.CTk):
             ctk.CTkLabel(fr,text=lbl,font=("",12)).grid(row=i,column=0,sticky="w",pady=8)
             e=ctk.CTkEntry(fr,width=180,font=("JetBrains Mono",13)); e.grid(row=i,column=1,pady=8,padx=(10,0))
             e.insert(0,str(v)); ent[k]=e
+        ctk.CTkLabel(fr,text="Strategy",font=("",12)).grid(row=2,column=0,sticky="w",pady=8)
+        strat_var=ctk.StringVar(value=h.get("strategy_type") or "LONG_TERM")
+        strat_menu=ctk.CTkOptionMenu(fr,width=180,values=["LONG_TERM","MEDIUM_TERM","SHORT_TERM"],variable=strat_var)
+        strat_menu.grid(row=2,column=1,pady=8,padx=(10,0))
         def _save():
             try: q=float(ent["units"].get().replace(",",".")); p=float(ent["avg_price"].get().replace(",","."))
             except: return
-            portfolio.update(hid,units=q,avg_price=p)
+            portfolio.update(hid,units=q,avg_price=p,strategy_type=strat_var.get())
             d.destroy(); self._refresh_display()
         ctk.CTkButton(d,text="Save",width=160,height=36,font=("",12,"bold"),fg_color="#4f46e5",command=_save).pack(pady=15)
 
     def _del_holding(self):
         for s in self.pf_tree.selection(): portfolio.delete(int(s))
         self._refresh_display()
+
+    def _update_sell_alerts(self,holdings):
+        try:
+            from portfolio import get_all_sell_alerts, format_sell_alert
+            alerts=get_all_sell_alerts(holdings,self.model_results,only_open=True)
+            self.pf_alerts.configure(state="normal")
+            self.pf_alerts.delete("1.0","end")
+            if not alerts:
+                self.pf_alerts.insert("end","No sell alerts.\n")
+            else:
+                for a in alerts[:5]:
+                    self.pf_alerts.insert("end",format_sell_alert(a)+"\n\n")
+            self.pf_alerts.configure(state="disabled")
+        except Exception: pass
 
     def _draw_projection(self,val):
         try:
@@ -644,6 +666,13 @@ class AlphaRanker(ctk.CTk):
         else: confidence_level="MEDIUM"
 
         from portfolio import build_suggested_portfolio
+        from portfolio.transaction_cost_model import TransactionCostParams
+        broker_fee=float(portfolio.get_setting("tx_cost_broker_fee","0").replace(",",".") or "0")
+        spread_bps=float(portfolio.get_setting("tx_cost_spread_bps","10").replace(",",".") or "10")
+        slippage_bps=float(portfolio.get_setting("tx_cost_slippage_bps","5").replace(",",".") or "5")
+        horizon_days=portfolio.get_setting("default_holding_horizon_days")
+        horizon_days=int(horizon_days) if horizon_days else 365
+        tx_params=TransactionCostParams(broker_fee=broker_fee,spread_bps=spread_bps,slippage_bps=slippage_bps)
         etf_positions=[("IWDA.AS","iShares MSCI World",0.6),("VWCE.DE","Vanguard All-World",0.4)]
         raw=self.model_results.copy()
         if "current_price" not in raw.columns:
@@ -656,6 +685,8 @@ class AlphaRanker(ctk.CTk):
             max_positions=max_pos,
             etf_budget=budget*etf_pct,
             etf_positions=etf_positions,
+            transaction_cost_params=tx_params,
+            holding_horizon_days=horizon_days,
         )
         proposals=[]
         for p in positions:
@@ -664,17 +695,25 @@ class AlphaRanker(ctk.CTk):
             alpha=p.get("alpha_score")
             alpha_str=f"+{alpha*100:.1f}%" if alpha is not None else p.get("alpha_score","-")
             if isinstance(alpha_str,(int,float)): alpha_str=f"+{float(alpha_str)*100:.1f}%" if alpha_str is not None else "-"
+            strat="LONG_TERM" if p.get("src")=="ETF" else "SHORT_TERM"
             proposals.append({
                 "src":p.get("src","?"),
                 "ticker":p["ticker"],
                 "name":p.get("name","")[:22],
                 "sector":p.get("sector","")[:14],
                 "alpha_score":alpha_str,
+                "alpha_score_num":p.get("alpha_score"),
                 "confidence":p.get("confidence"),
                 "price":p.get("price"),
                 "alloc":inv,
                 "shares":units,
                 "reason":p.get("reason","")[:40],
+                "expected_return":p.get("expected_return"),
+                "transaction_cost":p.get("transaction_cost"),
+                "target_price":p.get("target_price"),
+                "stop_loss":p.get("stop_loss"),
+                "holding_horizon":p.get("holding_horizon",horizon_days),
+                "strategy_type":p.get("strategy_type",strat),
             })
         self._show_proposals(proposals,budget,fees)
         self.bld_ai_status.configure(text="Quant engine done. Click 'Ask AI' for adjustments.")
@@ -790,7 +829,16 @@ class AlphaRanker(ctk.CTk):
                 portfolio.update(h["id"],units=new_units,avg_price=round(new_avg,2))
             else:
                 typ="etf" if p.get("src")=="ETF" or any(x in tk.upper() for x in ["IWDA","VWCE","QQQ","SPY","VTI"]) else "stock"
-                portfolio.add(tk,p.get("name",tk),typ,shares,round(float(price),2),"EUR")
+                strat=p.get("strategy_type") or ("LONG_TERM" if typ=="etf" else "SHORT_TERM")
+                portfolio.add(tk,p.get("name",tk),typ,shares,round(float(price),2),"EUR",
+                    strategy_type=strat,
+                    confidence=p.get("confidence"),
+                    alpha_score=p.get("alpha_score_num") if isinstance(p.get("alpha_score_num"),(int,float)) else None,
+                    expected_return=p.get("expected_return"),
+                    target_price=p.get("target_price"),
+                    stop_loss=p.get("stop_loss"),
+                    holding_horizon_days=p.get("holding_horizon"),
+                    transaction_cost=p.get("transaction_cost"))
             added+=1
         self._refresh_display()
         self.bld_summary.configure(text=f"Added {added} positions to portfolio!")
@@ -968,6 +1016,21 @@ class AlphaRanker(ctk.CTk):
             e.grid(row=row,column=1,sticky="w",pady=3); e.insert(0,portfolio.get_setting(k,""))
             self._sett[k]=e
             ctk.CTkLabel(scroll,text=h,font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
+            row+=1
+
+        # Portfolio decision engine (transaction costs, horizon)
+        ctk.CTkLabel(scroll,text="Portfolio decision engine",font=("",15,"bold")).grid(row=row,column=0,columnspan=3,sticky="w",pady=(15,8)); row+=1
+        for k,l,d,hint in [
+            ("tx_cost_broker_fee","Broker fee (EUR/trade)","0","Fixed fee per trade"),
+            ("tx_cost_spread_bps","Spread (bps)","10","Bid-ask spread in basis points"),
+            ("tx_cost_slippage_bps","Slippage (bps)","5","Slippage in bps"),
+            ("default_holding_horizon_days","Default holding horizon (days)","365","Exit after this many days if set"),
+        ]:
+            ctk.CTkLabel(scroll,text=l,font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+            e=ctk.CTkEntry(scroll,width=200,font=("JetBrains Mono",10))
+            e.grid(row=row,column=1,sticky="w",pady=3); e.insert(0,portfolio.get_setting(k,d))
+            self._sett[k]=e
+            ctk.CTkLabel(scroll,text=hint,font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
             row+=1
 
         # Investment Profile

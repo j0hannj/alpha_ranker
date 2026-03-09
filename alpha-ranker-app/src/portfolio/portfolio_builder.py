@@ -20,6 +20,12 @@ import pandas as pd
 
 from .confidence_filter import ConfidenceFilter, ConfidenceLevel, CONFIDENCE_THRESHOLDS
 from .allocation_engine import AllocationEngine
+from .transaction_cost_model import (
+    TransactionCostParams,
+    estimate_transaction_cost,
+    is_trade_economically_viable,
+    expected_return_as_fraction,
+)
 
 
 def build_suggested_portfolio(
@@ -30,23 +36,19 @@ def build_suggested_portfolio(
     max_positions: Optional[int] = None,
     etf_budget: float = 0.0,
     etf_positions: Optional[List[tuple]] = None,
+    transaction_cost_params: Optional[TransactionCostParams] = None,
+    min_return_vs_cost_multiple: float = 3.0,
+    holding_horizon_days: Optional[int] = None,
+    default_stop_loss_pct: float = 10.0,
 ) -> List[dict]:
     """
     Build a suggested portfolio from alpha model results.
-
-    - model_results: DataFrame with columns at least: ticker, confidence,
-      alpha_score, current_price; optional: name, sector, volatility_12m.
-    - budget: total capital (e.g. EUR).
-    - confidence_level: LOW | MEDIUM | HIGH (filters by confidence).
-    - weight_method: equal_weight | risk_parity | alpha_weight.
-    - max_positions: cap on number of stock picks (ETFs are additional).
-    - etf_budget: amount reserved for ETFs (subtracted from budget for stocks).
-    - etf_positions: optional list of (ticker, name, weight) for ETF slice.
-
-    Returns list of position dicts with ticker, price, units, invested_amount,
-    confidence, alpha_score, and optional name, sector, reason, src.
+    Rejects buys where expected_return < min_return_vs_cost_multiple * transaction_cost.
+    Output includes expected_return, transaction_cost, target_price, stop_loss, holding_horizon.
     """
     stock_budget = budget - etf_budget
+    tx_params = transaction_cost_params or TransactionCostParams()
+    horizon = holding_horizon_days or 365
     if stock_budget < 0:
         stock_budget = 0
 
@@ -68,6 +70,7 @@ def build_suggested_portfolio(
                 units = int(alloc / price)
                 if units > 0:
                     invested = units * price
+                    tx_cost = estimate_transaction_cost(price, units, notional=invested, params=tx_params)
                     out.append({
                         "src": "ETF",
                         "ticker": ticker,
@@ -79,6 +82,11 @@ def build_suggested_portfolio(
                         "alloc": round(invested, 2),
                         "confidence": None,
                         "alpha_score": None,
+                        "expected_return": None,
+                        "transaction_cost": round(tx_cost, 2),
+                        "target_price": None,
+                        "stop_loss": None,
+                        "holding_horizon": horizon,
                         "reason": "Core diversification",
                     })
             else:
@@ -93,6 +101,11 @@ def build_suggested_portfolio(
                     "alloc": round(alloc, 2),
                     "confidence": None,
                     "alpha_score": None,
+                    "expected_return": None,
+                    "transaction_cost": None,
+                    "target_price": None,
+                    "stop_loss": None,
+                    "holding_horizon": horizon,
                     "reason": "Core diversification (price unknown)",
                 })
 
@@ -119,10 +132,30 @@ def build_suggested_portfolio(
             row = model_results[model_results["ticker"] == p["ticker"]]
             name = row.iloc[0]["name"] if not row.empty and "name" in row.columns else p["ticker"]
             sector = row.iloc[0]["sector"] if not row.empty and "sector" in row.columns else ""
+            price = p["price"]
+            invested = p["invested_amount"]
+            units = p["units"]
+            alpha_val = p.get("alpha_score")
+            if alpha_val is None and not row.empty:
+                pr = row.iloc[0].get("predicted_return_pct")
+                alpha_val = float(pr) / 100.0 if pr is not None and pd.notna(pr) else None
+            expected_return_frac = expected_return_as_fraction(alpha_val * 100) if alpha_val is not None else 0.0
+            tx_cost = estimate_transaction_cost(price, units, notional=invested, params=tx_params)
+            tx_cost_frac = tx_cost / invested if invested and invested > 0 else 0
+            if not is_trade_economically_viable(expected_return_frac, tx_cost_frac, min_multiple=min_return_vs_cost_multiple):
+                continue
+            target_price = round(price * (1 + expected_return_frac), 2) if expected_return_frac else None
+            stop_pct = default_stop_loss_pct / 100.0
+            stop_loss = round(price * (1 - stop_pct), 2) if price else None
             p["src"] = "Model"
             p["name"] = name[:22] if isinstance(name, str) else str(name)[:22]
             p["sector"] = sector[:14] if isinstance(sector, str) else ""
             p["alloc"] = p["invested_amount"]
+            p["expected_return"] = round(expected_return_frac * 100, 2) if expected_return_frac is not None else None
+            p["transaction_cost"] = round(tx_cost, 2)
+            p["target_price"] = target_price
+            p["stop_loss"] = stop_loss
+            p["holding_horizon"] = horizon
             p["reason"] = f"Rank signal, confidence {p.get('confidence'):.2f}" if p.get("confidence") is not None else "Rank signal"
             out.append(p)
 

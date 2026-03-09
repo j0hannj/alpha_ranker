@@ -1,10 +1,31 @@
-"""Portfolio manager with SQLite persistence."""
+"""Portfolio manager with SQLite persistence.
+
+Tracks positions with strategy type (LONG_TERM / MEDIUM_TERM / SHORT_TERM),
+entry/current prices, model metrics (confidence, alpha_score, expected_return),
+target_price, stop_loss, holding_horizon_days, transaction_cost, and status (OPEN/SOLD).
+"""
 import sqlite3
 import json
 from pathlib import Path
 from datetime import datetime
 
 DB_PATH = Path(__file__).parent.parent.parent / "db" / "portfolio.db"
+
+# New columns for decision-engine tracking (added via migration)
+_HOLDINGS_EXTRA_COLUMNS = [
+    ("strategy_type", "TEXT DEFAULT 'LONG_TERM'"),
+    ("asset_type", "TEXT"),
+    ("entry_price", "REAL"),
+    ("entry_date", "TEXT"),
+    ("confidence", "REAL"),
+    ("alpha_score", "REAL"),
+    ("expected_return", "REAL"),
+    ("target_price", "REAL"),
+    ("stop_loss", "REAL"),
+    ("holding_horizon_days", "INTEGER"),
+    ("transaction_cost", "REAL"),
+    ("status", "TEXT DEFAULT 'OPEN'"),
+]
 
 def _conn():
     DB_PATH.parent.mkdir(exist_ok=True)
@@ -25,6 +46,11 @@ def _conn():
         added_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
+    # Migration: add decision-engine columns if missing
+    info = {row[1] for row in c.execute("PRAGMA table_info(holdings)").fetchall()}
+    for col, spec in _HOLDINGS_EXTRA_COLUMNS:
+        if col not in info:
+            c.execute(f"ALTER TABLE holdings ADD COLUMN {col} {spec}")
     c.execute("""CREATE TABLE IF NOT EXISTS price_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ticker TEXT, price REAL, date TEXT DEFAULT CURRENT_TIMESTAMP
@@ -41,10 +67,17 @@ def get_all():
     c.close()
     return [dict(r) for r in rows]
 
-def add(ticker, name, typ, units, avg_price, currency, sector=None, sectors_json=None, isin=None):
+def add(ticker, name, typ, units, avg_price, currency, sector=None, sectors_json=None, isin=None,
+        strategy_type="LONG_TERM", entry_date=None, confidence=None, alpha_score=None, expected_return=None,
+        target_price=None, stop_loss=None, holding_horizon_days=None, transaction_cost=None):
     c = _conn()
-    c.execute("INSERT INTO holdings (ticker,isin,name,type,units,avg_price,currency,sector,sectors_json) VALUES (?,?,?,?,?,?,?,?,?)",
-              (ticker, isin, name, typ, units, avg_price, currency, sector, sectors_json))
+    entry_date = entry_date or datetime.now().strftime("%Y-%m-%d")
+    c.execute("""INSERT INTO holdings (ticker,isin,name,type,units,avg_price,current_price,currency,sector,sectors_json,
+        strategy_type,asset_type,entry_price,entry_date,confidence,alpha_score,expected_return,target_price,stop_loss,
+        holding_horizon_days,transaction_cost,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (ticker, isin, name, typ, units, avg_price, avg_price, currency, sector, sectors_json,
+         strategy_type, typ, avg_price, entry_date, confidence, alpha_score, expected_return, target_price, stop_loss,
+         holding_horizon_days, transaction_cost, "OPEN"))
     c.commit(); c.close()
 
 def update(hid, **kwargs):
