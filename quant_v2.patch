@@ -1,0 +1,104 @@
+diff --git a/src/quant/regime.py b/src/quant/regime.py
+new file mode 100644
+--- /dev/null
++++ b/src/quant/regime.py
+@@
++import pandas as pd
++from sklearn.cluster import KMeans
++
++def detect_regimes(returns, n_regimes=3):
++
++    vol = returns.rolling(60).std()
++
++    X = pd.concat([
++        returns.mean(axis=1),
++        vol.mean(axis=1)
++    ], axis=1).dropna()
++
++    model = KMeans(n_clusters=n_regimes)
++    regimes = model.fit_predict(X)
++
++    regime_series = pd.Series(regimes, index=X.index)
++
++    return regime_series
+
+
+diff --git a/src/quant/ensemble.py b/src/quant/ensemble.py
+new file mode 100644
+--- /dev/null
++++ b/src/quant/ensemble.py
+@@
++import numpy as np
++
++def ensemble_predictions(predictions):
++
++    stacked = np.column_stack(predictions)
++
++    return stacked.mean(axis=1)
+
+
+diff --git a/src/quant/optimizer.py b/src/quant/optimizer.py
+new file mode 100644
+--- /dev/null
++++ b/src/quant/optimizer.py
+@@
++import numpy as np
++
++def mean_variance_opt(expected_returns, cov):
++
++    inv = np.linalg.pinv(cov)
++
++    w = inv @ expected_returns
++
++    w = w / np.sum(np.abs(w))
++
++    return w
+
+
+diff --git a/src/quant/factors.py b/src/quant/factors.py
+new file mode 100644
+--- /dev/null
++++ b/src/quant/factors.py
+@@
++import pandas as pd
++
++def factor_momentum(prices):
++
++    px = prices.unstack()
++
++    return px.pct_change(252).stack().rename("momentum")
++
++
++def factor_reversal(prices):
++
++    px = prices.unstack()
++
++    return -px.pct_change(21).stack().rename("reversal")
++
++
++def factor_volatility(prices):
++
++    ret = prices.unstack().pct_change()
++
++    return ret.rolling(63).std().stack().rename("volatility")
+
+
+diff --git a/src/quant/performance.py b/src/quant/performance.py
+new file mode 100644
+--- /dev/null
++++ b/src/quant/performance.py
+@@
++import numpy as np
++
++def sharpe_ratio(returns):
++
++    return np.mean(returns) / np.std(returns)
++
++
++def max_drawdown(equity):
++
++    peak = equity.cummax()
++
++    dd = (equity - peak) / peak
++
++    return dd.min()
