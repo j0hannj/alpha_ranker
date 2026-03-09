@@ -63,6 +63,8 @@ def build_suggested_portfolio(
     horizon = holding_horizon_days or ps.get("holding_horizon_days", 365)
     review_frequency_days = ps.get("review_frequency_days", 30)
 
+    out: List[dict] = []
+
     # Portfolio improvement: consider selling weak holdings to free capital
     freed_capital = 0.0
     holdings = existing_holdings or []
@@ -123,8 +125,6 @@ def build_suggested_portfolio(
     stock_budget = budget - etf_budget + freed_capital
     if stock_budget < 0:
         stock_budget = 0
-
-    out: List[dict] = []
 
     # ETF slice: fixed allocations; use real price for units
     if etf_budget > 0 and etf_positions:
