@@ -11,7 +11,7 @@ from .confidence_filter import ConfidenceFilter, CONFIDENCE_THRESHOLDS
 from .allocation_engine import AllocationEngine
 from .portfolio_builder import PortfolioBuilder, build_suggested_portfolio
 from .transaction_cost_model import TransactionCostParams, estimate_transaction_cost, is_trade_economically_viable
-from .sell_signal_engine import evaluate_sell_signals, get_all_sell_alerts, SellAlert, format_sell_alert
+from .sell_signal_engine import evaluate_sell_signals, get_all_sell_alerts, get_all_sell_signals, SellAlert, format_sell_alert
 from .portfolio_database import get_open_positions, add_position, update_position, mark_sold, STRATEGY_TYPES
 
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
     "is_trade_economically_viable",
     "evaluate_sell_signals",
     "get_all_sell_alerts",
+    "get_all_sell_signals",
     "SellAlert",
     "format_sell_alert",
     "get_open_positions",

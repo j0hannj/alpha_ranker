@@ -226,9 +226,16 @@ class AlphaRanker(ctk.CTk):
         ctk.CTkLabel(rp,text="Sector Exposure",font=("",12,"bold")).pack(padx=10,pady=6)
         self.pf_sec=ctk.CTkTextbox(rp,font=("JetBrains Mono",10),state="disabled",fg_color="#09090b",height=90)
         self.pf_sec.pack(fill="x",padx=5,pady=3)
-        ctk.CTkLabel(rp,text="Sell Alerts",font=("",11,"bold"),text_color="#f87171").pack(padx=10,pady=(6,2))
-        self.pf_alerts=ctk.CTkTextbox(rp,font=("JetBrains Mono",9),state="disabled",fg_color="#09090b",height=85)
-        self.pf_alerts.pack(fill="x",padx=5,pady=3)
+        ctk.CTkLabel(rp,text="Sell Signals",font=("",11,"bold"),text_color="#f87171").pack(padx=10,pady=(6,2))
+        pf_sell_cols=("ticker","signal","urgency","strategy","pred","rank","agr","reason")
+        self.pf_sell_frame=ctk.CTkFrame(rp,fg_color="transparent")
+        self.pf_sell_frame.pack(fill="x",padx=5,pady=3)
+        self.pf_sell_tree=ttk.Treeview(self.pf_sell_frame,columns=pf_sell_cols,show="headings",style="T.Treeview",height=6)
+        for c,h,w in zip(pf_sell_cols,["Ticker","Signal","Urgency","Strategy","Pred%","Rank","Agr%","Reason"],[52,48,52,72,52,48,48,120]):
+            self.pf_sell_tree.heading(c,text=h); self.pf_sell_tree.column(c,width=w,anchor="w" if c in ("ticker","reason") else "e")
+        self.pf_sell_tree.pack(fill="x")
+        self.pf_sell_tree.tag_configure("sell",foreground="#f87171"); self.pf_sell_tree.tag_configure("review",foreground="#fb923c"); self.pf_sell_tree.tag_configure("hold",foreground="#34d399")
+        self.pf_sell_placeholder=ctk.CTkLabel(self.pf_sell_frame,text="Run the alpha model first (Rankings \u2192 Run Model) to evaluate sell signals.",font=("",10),text_color="#71717a",wraplength=300)
         ctk.CTkLabel(rp,text="DCA Projection",font=("",11,"bold")).pack(padx=10,pady=(8,2))
         self.pf_proj=ctk.CTkFrame(rp,fg_color="#09090b",corner_radius=8)
         self.pf_proj.pack(fill="both",expand=True,padx=5,pady=3)
@@ -383,60 +390,112 @@ class AlphaRanker(ctk.CTk):
 
     def _update_sell_alerts(self,holdings):
         try:
-            from portfolio import get_all_sell_alerts, format_sell_alert
-            alerts=get_all_sell_alerts(holdings,self.model_results,only_open=True)
-            self.pf_alerts.configure(state="normal")
-            self.pf_alerts.delete("1.0","end")
-            if not alerts:
-                self.pf_alerts.insert("end","No sell alerts.\n")
-            else:
-                for a in alerts[:5]:
-                    self.pf_alerts.insert("end",format_sell_alert(a)+"\n\n")
-            self.pf_alerts.configure(state="disabled")
+            mr = self.model_results
+            no_model = mr is None or (getattr(mr, "empty", True) and mr.empty)
+            if no_model:
+                self.pf_sell_tree.pack_forget()
+                self.pf_sell_placeholder.pack(fill="x",pady=8,padx=4)
+                return
+            self.pf_sell_placeholder.pack_forget()
+            self.pf_sell_tree.pack(fill="x")
+            from portfolio import get_all_sell_signals
+            signals=get_all_sell_signals(holdings,self.model_results,only_open=True)
+            self.pf_sell_tree.delete(*self.pf_sell_tree.get_children())
+            for s in signals:
+                pr=s.get("predicted_return_pct")
+                pred_str=f"{pr:+.1f}%" if pr is not None and (not isinstance(pr,float) or pr==pr) else "—"
+                rk=s.get("alpha_rank")
+                rank_str=f"#{rk}" if rk is not None else "—"
+                agr=s.get("model_agreement")
+                agr_str=f"{agr*100:.0f}%" if agr is not None and (not isinstance(agr,float) or agr==agr) else "—"
+                reason=(s.get("reason") or "—")
+                if len(reason)>28: reason=reason[:26]+"…"
+                urgency=s.get("urgency") or "—"
+                tag="sell" if s.get("signal")=="SELL" else "review" if s.get("signal")=="REVIEW" else "hold"
+                self.pf_sell_tree.insert("","end",values=(
+                    s.get("ticker",""),
+                    s.get("signal","HOLD"),
+                    urgency,
+                    (s.get("strategy") or "—")[:10],
+                    pred_str,
+                    rank_str,
+                    agr_str,
+                    reason,
+                ),tags=(tag,))
         except Exception: pass
 
     def _draw_projection(self,val):
         try:
-            import matplotlib; matplotlib.use("Agg")
+            for w in self.pf_proj.winfo_children(): w.destroy()
+            mr = self.model_results
+            pnl = self._portfolio_pnl
+            no_model = mr is None or (getattr(mr, "empty", True) and mr.empty)
+            no_holdings = not pnl or not pnl.get("holdings")
+            if no_model or no_holdings:
+                msg = "DCA projection requires model predictions. Run the alpha model first (Rankings \u2192 Run Model) to generate return forecasts."
+                if no_holdings and not no_model:
+                    msg = "Add holdings to your portfolio to see DCA projection."
+                ctk.CTkLabel(self.pf_proj, text=msg, font=("", 10), text_color="#71717a", wraplength=320).pack(padx=12, pady=24, fill="x")
+                return
+            projs = model.project_portfolio_prices(pnl, mr, model_info=getattr(self, "model_info", None))
+            if not projs:
+                ctk.CTkLabel(self.pf_proj, text="No price projections. Run the model for your holdings.", font=("", 10), text_color="#71717a", wraplength=320).pack(padx=12, pady=24, fill="x")
+                return
+            H = 12
+            if isinstance(getattr(self, "model_info", None), dict) and self.model_info.get("prediction_horizon_months") is not None:
+                H = int(self.model_info["prediction_horizon_months"])
+            if H <= 0:
+                H = 12
+            total_value = sum(h.get("value", 0) or 0 for h in pnl.get("holdings", []))
+            weighted_return = 0.0
+            for proj in projs:
+                v = (proj.get("current_price") or 0) * (proj.get("units") or 0)
+                r_H = proj.get("annual_return", 0.08)
+                annual_r = (1.0 + float(r_H)) ** (12.0 / H) - 1.0
+                weighted_return += annual_r * v
+            portfolio_annual_return = weighted_return / total_value if total_value > 0 else 0.08
+            try:
+                dca_val = float(str(portfolio.get_setting("monthly_dca", "2200")).replace(",", ".") or "2200")
+            except Exception:
+                dca_val = 2200
+            mo = 240
+            monthly_r = (1.0 + portfolio_annual_return) ** (1.0 / 12) - 1.0
+            current_value = total_value
+            total_contributed = total_value
+            trace_val = [current_value / 1000]
+            trace_contrib = [total_contributed / 1000]
+            for _ in range(1, mo + 1):
+                current_value = current_value * (1 + monthly_r) + dca_val
+                total_contributed += dca_val
+                trace_val.append(current_value / 1000)
+                trace_contrib.append(total_contributed / 1000)
+            import matplotlib
+            matplotlib.use("Agg")
             from matplotlib.figure import Figure
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-            import numpy as np
-            for w in self.pf_proj.winfo_children(): w.destroy()
-            dca=2200; mo=240
-            etf_n={"nasdaq":0.11,"msci world":0.08,"all-world":0.08,"ftse all":0.08}
-            mr=None
-            if self.model_results is not None and self._portfolio_pnl:
-                wp=tw=0
-                for h in self._portfolio_pnl.get("holdings",[]):
-                    t,w=h["ticker"],h.get("value",0)
-                    if w<=0: continue
-                    m=self.model_results[self.model_results["ticker"]==t]
-                    if not m.empty: wp+=(m.iloc[0]["predicted_return_pct"]/100)*w; tw+=w
-                    else:
-                        nm=h.get("name","").lower()
-                        for frag,r in etf_n.items():
-                            if frag in nm: wp+=r*w; tw+=w; break
-                if tw>0: mr=max(0.02,min(wp/tw,0.25))
-            fig=Figure(figsize=(3,2.2),dpi=90,facecolor="#09090b")
-            ax=fig.add_subplot(111); ax.set_facecolor("#09090b")
-            for ret,lbl,col in [(0.06,"6%","#f8717155"),(0.08,"8%","#71717a"),(0.10,"10%","#34d39955")]:
-                r=(1+ret)**(1/12)-1; v=[val]
-                for _ in range(mo): v.append(v[-1]*(1+r)+dca)
-                ax.plot([i/12 for i in range(mo+1)],[x/1000 for x in v],color=col,linewidth=0.8,linestyle="--",alpha=0.6,label=lbl)
-            if mr:
-                r=(1+mr)**(1/12)-1; v=[val]
-                for _ in range(mo): v.append(v[-1]*(1+r)+dca)
-                ax.plot([i/12 for i in range(mo+1)],[x/1000 for x in v],color="#818cf8",linewidth=2.5,label=f"{mr*100:.1f}% Model")
-            for y in [100,500]: ax.axhline(y=y,color="#52525b",linestyle=":",linewidth=0.4,alpha=0.4)
-            ax.axhline(y=1000,color="#818cf8",linestyle=":",linewidth=0.4,alpha=0.4)
-            ax.set_xlabel("Years",fontsize=7,color="#71717a"); ax.set_ylabel("k EUR",fontsize=7,color="#71717a")
-            ax.tick_params(colors="#52525b",labelsize=6)
-            for s in ["top","right"]: ax.spines[s].set_visible(False)
-            for s in ["bottom","left"]: ax.spines[s].set_color("#27272a")
-            ax.legend(fontsize=5,loc="upper left",facecolor="#18181b",edgecolor="#27272a",labelcolor="#a1a1aa")
+            fig = Figure(figsize=(3, 2.2), dpi=90, facecolor="#09090b")
+            ax = fig.add_subplot(111)
+            ax.set_facecolor("#09090b")
+            years = [i / 12 for i in range(mo + 1)]
+            ax.plot(years, trace_val, color="#818cf8", linewidth=2.5, label=f"Portfolio ({portfolio_annual_return*100:.1f}%/yr)")
+            ax.plot(years, trace_contrib, color="#52525b", linewidth=1, linestyle="--", alpha=0.7, label="Contributions")
+            for y in [100, 500]:
+                ax.axhline(y=y, color="#52525b", linestyle=":", linewidth=0.4, alpha=0.4)
+            ax.axhline(y=1000, color="#818cf8", linestyle=":", linewidth=0.4, alpha=0.4)
+            ax.set_xlabel("Years", fontsize=7, color="#71717a")
+            ax.set_ylabel("k EUR", fontsize=7, color="#71717a")
+            ax.tick_params(colors="#52525b", labelsize=6)
+            for s in ["top", "right"]:
+                ax.spines[s].set_visible(False)
+            for s in ["bottom", "left"]:
+                ax.spines[s].set_color("#27272a")
+            ax.legend(fontsize=5, loc="upper left", facecolor="#18181b", edgecolor="#27272a", labelcolor="#a1a1aa")
             fig.tight_layout(pad=0.5)
-            c=FigureCanvasTkAgg(fig,master=self.pf_proj); c.draw(); c.get_tk_widget().pack(fill="both",expand=True)
-        except: pass
+            c = FigureCanvasTkAgg(fig, master=self.pf_proj)
+            c.draw()
+            c.get_tk_widget().pack(fill="both", expand=True)
+        except Exception:
+            pass
 
     def _draw_value_chart(self,holdings):
         try:
