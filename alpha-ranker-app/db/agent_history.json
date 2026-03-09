@@ -126,5 +126,13 @@
   {
     "role": "assistant",
     "content": "PORTFOLIO AU JOURD'HUI  \nTOTAL VAL. : 25 351 EUR | BÉNÉF. : +868 EUR (+3,5 %)  \n- IWDA.AS : +2,9 %  \n- VWCE.DE : +14,4 %  \n- AAPL : -2,8 %  \n- AMZN : -5,4 %  \n- AVGO : +0,7 %  \n- BRK‑B : +0,8 %  \n- GOOG : -0,5 %  \n- IONQ : -19,3 %  \n- MSFT : -14,6 %  \n- NVDA : +0,9 %  \n- PLTR : -14,3 %  \n\n--- MARCHÉ DE LA NUIT ---  \n[ACTION:search_news] query=\"overnight market moves 2026\"  \n\n--- NÉO‑NEWS SPÉCIFIQUES ---  \n[ACTION:search_news] query=\"IWDA.AS news\"  \n[ACTION:search_news] query=\"VWCE.DE news\"  \n[ACTION:search_news] query=\"AAPL news\"  \n[ACTION:search_news] query=\"AMZN news\"  \n[ACTION:search_news] query=\"AVGO news\"  \n[ACTION:search_news] query=\"BRK-B news\"  \n[ACTION:search_news] query=\"GOOG news\"  \n[ACTION:search_news] query=\"IONQ news\"  \n[ACTION:search_news] query=\"MSFT news\"  \n[ACTION:search_news] query=\"NVDA news\"  \n[ACTION:search_news] query=\"PLTR news\"  \n\n--- CONSEIL ACTIONNEL ---  \nRééquilibrer votre portefeuille en vendant partiellement IONQ pour libérer 30 % de ses pertes et réallouer ces fonds dans des titres à forte dynamique (ex. AAPL ou MSFT) afin de profiter du momentum technologique actuel."
+  },
+  {
+    "role": "user",
+    "content": "Give me a SHORT morning market briefing in French. Include:\n1. How my portfolio is doing today (use the P&L data you have)\n2. Key market moves overnight (search news)\n3. Any news affecting my holdings specifically\n4. One actionable insight\nKeep it under 150 words. No greetings, go straight to the data."
+  },
+  {
+    "role": "assistant",
+    "content": ""
   }
 ]
