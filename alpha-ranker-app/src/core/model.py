@@ -365,8 +365,19 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         config = get_model_settings()
     if config is None:
         config = {}
+    try:
+        from core.engine_config import MODEL_IDS
+    except Exception:
+        MODEL_IDS = ["LightGBM", "XGBoost", "RandomForest", "Ridge", "ElasticNet", "TCN", "LSTM"]
+    emode = config.get("execution_mode", "all")
+    if emode == "all":
+        config = {**config, "enabled_models": list(MODEL_IDS)}
+    elif emode == "single":
+        sid = config.get("single_model_id", "LightGBM")
+        config = {**config, "enabled_models": [sid] if sid in (MODEL_IDS if isinstance(MODEL_IDS, list) else list(MODEL_IDS)) else ["LightGBM"]}
+    H = config.get("prediction_horizon_months", horizon_months)
     rebal_dates = [datetime(y,m,1) for y in range(start_year,datetime.now().year+1)
-                   for m in [1,4,7,10] if datetime(y,m,1) < datetime.now()-timedelta(days=horizon_months*30)]
+                   for m in [1,4,7,10] if datetime(y,m,1) < datetime.now()-timedelta(days=H*30)]
     if callback: callback(f"Walk-forward: {len(rebal_dates)} periods")
     all_periods = []; meta_cols = ["ticker","date","sector","name","forward_return"]
     for i,rd in enumerate(rebal_dates):
@@ -374,7 +385,7 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         df = build_features_asof(prices,fundamentals_db,macro,rd,tickers)
         if len(df)==0: continue
         df = add_sector_interactions(df,sector_map)
-        df["forward_return"] = df["ticker"].apply(lambda t: compute_forward_return(prices,t,rd,horizon_months))
+        df["forward_return"] = df["ticker"].apply(lambda t: compute_forward_return(prices,t,rd,H))
         df = df.dropna(subset=["forward_return"])
         if len(df)<20: continue
         df["period_idx"]=i; all_periods.append(df)
@@ -891,6 +902,43 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
     return ensemble,medians,fcols,df,feat_imp,oos_metrics
 
 # ══════════════════════════════════════════════════════════════
+# MARKET REGIME DETECTION
+# ══════════════════════════════════════════════════════════════
+def detect_market_regime(prices, macro=None):
+    """Simple regime: bull/bear from 6m return, high_vol/low_vol from recent volatility.
+    Returns dict: regime (str), return_6m, volatility_21d, vix (if macro)."""
+    out = {"regime": "unknown", "return_6m": None, "volatility_21d": None, "vix": None}
+    if prices is None or not hasattr(prices, "columns"):
+        return out
+    try:
+        if isinstance(prices.columns, pd.MultiIndex):
+            cols = [c for c in prices.columns if isinstance(c, tuple) and len(c) == 2]
+            if not cols:
+                return out
+            ticker = cols[0][0]
+            close = prices[(ticker, "Close")].dropna() if (ticker, "Close") in prices.columns else None
+        else:
+            close = prices["Close"].dropna() if "Close" in prices.columns else prices.iloc[:, 0].dropna()
+        if close is None or len(close) < 126:
+            return out
+        ret_6m = (close.iloc[-1] / close.iloc[-126]) - 1 if len(close) >= 126 else None
+        daily = close.pct_change().dropna()
+        vol_21 = float(daily.tail(21).std() * np.sqrt(252)) if len(daily) >= 21 else None
+        out["return_6m"] = round(float(ret_6m), 4) if ret_6m is not None else None
+        out["volatility_21d"] = round(vol_21, 4) if vol_21 is not None else None
+        if isinstance(macro, dict) and macro.get("vix") is not None:
+            out["vix"] = float(macro["vix"])
+        if ret_6m is not None:
+            out["regime"] = "bull" if ret_6m > 0.05 else "bear" if ret_6m < -0.05 else "neutral"
+        if vol_21 is not None:
+            vol_label = "high_vol" if vol_21 > 0.25 else "low_vol" if vol_21 < 0.15 else "medium_vol"
+            out["regime"] = out["regime"] + "_" + vol_label
+    except Exception:
+        pass
+    return out
+
+
+# ══════════════════════════════════════════════════════════════
 # PIPELINE ORCHESTRATOR
 # ══════════════════════════════════════════════════════════════
 def run_full_pipeline(callback=None):
@@ -929,7 +977,9 @@ def run_full_pipeline(callback=None):
                                         macro,sector_map,list(yf_fund.keys()),
                                         yf_info=yf_fund,callback=callback,config=config)
         if sentiment: results["news_sentiment"]=results["ticker"].map(sentiment).fillna(0)
-        model_info = {"mode":"walk_forward_ensemble","n_features":len(feat_cols),"blend":blend,"prediction_horizon_months":12,**oos_metrics}
+        H = (config or {}).get("prediction_horizon_months", 12)
+        model_info = {"mode":"walk_forward_ensemble","n_features":len(feat_cols),"blend":blend,"prediction_horizon_months":H,**oos_metrics}
+        model_info["market_regime"] = detect_market_regime(prices, macro)
         # Store full model state for explanations
         _store_model_state(final_models, medians, feat_cols, prices, fund_db, sector_map, yf_fund)
     else:

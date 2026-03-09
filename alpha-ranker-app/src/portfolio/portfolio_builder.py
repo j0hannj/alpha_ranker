@@ -30,10 +30,11 @@ from .transaction_cost_model import (
 )
 
 try:
-    from core.engine_config import get_portfolio_settings, strategy_type_from_horizon
+    from core.engine_config import get_portfolio_settings, strategy_type_from_horizon, get_risk_settings
 except Exception:
     get_portfolio_settings = None
     strategy_type_from_horizon = lambda d: "MEDIUM_TERM" if d <= 180 else "LONG_TERM"
+    get_risk_settings = lambda: {}
 
 # Sector key used in model (e.g. "Technology") -> registry key (e.g. "technology_weight")
 _SECTOR_TO_WEIGHT_KEY = {
@@ -372,6 +373,10 @@ def build_suggested_portfolio(
             total_val = holdings_total + etf_budget
         running_sector = dict(sector_val)
         running_total = total_val
+        # Turnover control: limit trading unless opportunity is significant
+        risk = get_risk_settings() if get_risk_settings else {}
+        max_turnover_pct = float(risk.get("max_turnover_pct", 0.5))
+        turnover_so_far = freed_capital  # from SELLs
 
         def _add_position(
             p: dict,
@@ -419,9 +424,10 @@ def build_suggested_portfolio(
                 p["reason"] = (p.get("reason", "") or "") + " (relaxed tx)"
             p["action"] = "BUY"
             out.append(p)
-            nonlocal running_sector, running_total
+            nonlocal running_sector, running_total, turnover_so_far
             running_sector[sector] = running_sector.get(sector, 0) + invested
             running_total += invested
+            turnover_so_far += invested
 
         relaxed_multiple = 2.0  # fallback when 3x would yield zero candidates
         for min_mult in (min_return_vs_cost_multiple, relaxed_multiple):
@@ -450,6 +456,10 @@ def build_suggested_portfolio(
                 new_total = running_total + invested
                 if new_total > 0 and new_sector_val / new_total > max_sector_pct:
                     continue
+                # Turnover control: skip if adding this trade would exceed max_turnover_pct
+                if total_val > 0 and max_turnover_pct < 1.0:
+                    if (turnover_so_far + invested) / total_val > max_turnover_pct:
+                        continue
                 review_date = (datetime.now() + timedelta(days=review_frequency_days)).strftime("%Y-%m-%d")
                 stop_pct = default_stop_loss_pct / 100.0
                 _add_position(

@@ -502,6 +502,12 @@ class AlphaRanker(ctk.CTk):
         self.rk_tree.tag_configure("warm",foreground="#fbbf24")
         self.rk_tree.tag_configure("normal",foreground="#e4e4e7")
         self.rk_tree.tag_configure("cold",foreground="#71717a")
+        self.rk_compare_frame=ctk.CTkFrame(tab,fg_color="transparent")
+        self.rk_compare_frame.grid(row=2,column=0,sticky="ew",padx=10,pady=(4,0))
+        self.rk_compare_frame.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(self.rk_compare_frame,text="Model comparison (Rank IC): ",font=("",10,"bold"),text_color="#a1a1aa").grid(row=0,column=0,sticky="w")
+        self.rk_compare_lbl=ctk.CTkLabel(self.rk_compare_frame,text="Run model to see per-model IC.",font=("JetBrains Mono",9),text_color="#71717a")
+        self.rk_compare_lbl.grid(row=0,column=1,sticky="w",padx=(4,0))
 
     def _refresh_data_updated_label(self):
         """Set Rankings tab label to last data update time. Always show when we have model data."""
@@ -566,6 +572,13 @@ class AlphaRanker(ctk.CTk):
             if last_run and hasattr(self,"rk_data_updated"):
                 self.rk_data_updated.configure(text=f"Last model run: {last_run}",text_color="#34d399")
         except Exception: pass
+        if hasattr(self,"rk_compare_lbl") and self.model_info:
+            pm=self.model_info.get("per_model_ic") or {}
+            if pm:
+                txt=" | ".join(f"{n}: {v:.3f}" for n,v in sorted(pm.items(),key=lambda x:-x[1]))
+                self.rk_compare_lbl.configure(text=txt[:200] if len(txt)>200 else txt,text_color="#e4e4e7")
+            else:
+                self.rk_compare_lbl.configure(text="No per-model IC (single run).",text_color="#71717a")
         self.rk_tree.delete(*self.rk_tree.get_children())
         for _,r in display_df.iterrows():
             ret=sc(r["predicted_return_pct"]); conf=r.get("confidence",0)
@@ -1261,6 +1274,10 @@ class AlphaRanker(ctk.CTk):
             ens_var = tk.StringVar(value=mset.get("ensemble_method","ic_weighted_average"))
             ctk.CTkOptionMenu(scroll,values=_engine_cfg.ENSEMBLE_METHODS,variable=ens_var,width=180).grid(row=row,column=1,sticky="w",pady=3)
             self._engine_vars["ensemble_method"]=ens_var; row+=1
+            ctk.CTkLabel(scroll,text="Prediction horizon (months)",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+            hz_var = tk.StringVar(value=str(mset.get("prediction_horizon_months",12)))
+            ctk.CTkOptionMenu(scroll,values=["3","6","12","24"],variable=hz_var,width=80).grid(row=row,column=1,sticky="w",pady=3)
+            self._engine_vars["prediction_horizon_months"]=hz_var; row+=1
             for k,l in [("winsorization","Winsorization"),("rank_normalization","Rank normalization"),("sector_neutralization","Sector neutralization"),("use_gpu","Use GPU for TCN/LSTM (auto-detect)")]:
                 v = tk.BooleanVar(value=mset.get(k,True))
                 ctk.CTkCheckBox(scroll,text=l,variable=v,font=("",11)).grid(row=row,column=0,columnspan=2,sticky="w",padx=8,pady=2)
@@ -1353,11 +1370,14 @@ class AlphaRanker(ctk.CTk):
                 vo = self._engine_vars.get("execution_mode")
                 sm = self._engine_vars.get("single_model_id")
                 em = self._engine_vars.get("ensemble_method")
+                hz_var = self._engine_vars.get("prediction_horizon_months")
+                hz_val = int(hz_var.get()) if hz_var else 12
                 mset = {
                     "enabled_models": enabled or _engine_cfg.MODEL_IDS[:4],
                     "execution_mode": vo.get() if vo else "all",
                     "single_model_id": sm.get() if sm else "LightGBM",
                     "ensemble_method": em.get() if em else "ic_weighted_average",
+                    "prediction_horizon_months": hz_val,
                     "winsorization": _ev("winsorization", True),
                     "rank_normalization": _ev("rank_normalization", True),
                     "sector_neutralization": _ev("sector_neutralization", True),
