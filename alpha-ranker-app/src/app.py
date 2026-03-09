@@ -574,6 +574,9 @@ class AlphaRanker(ctk.CTk):
         ctk.CTkLabel(top,text="Max positions:",font=("",11)).pack(side="left",padx=(12,4))
         self.bld_max=ctk.CTkOptionMenu(top,width=55,values=["3","5","8","10","15"],font=("",11))
         self.bld_max.set("8"); self.bld_max.pack(side="left")
+        ctk.CTkLabel(top,text="Confidence:",font=("",11)).pack(side="left",padx=(12,4))
+        self.bld_confidence=ctk.CTkOptionMenu(top,width=140,values=["Low (more diversification)","Medium","High (strongest signals)"],font=("",10))
+        self.bld_confidence.set("Medium"); self.bld_confidence.pack(side="left")
         ctk.CTkButton(top,text="Generate",width=120,height=30,font=("",12,"bold"),
                       fg_color="#4f46e5",command=self._gen_build).pack(side="right")
 
@@ -598,11 +601,11 @@ class AlphaRanker(ctk.CTk):
         ctk.CTkButton(hdr,text="Ask AI to Adjust",width=140,height=26,font=("",10),
                       fg_color="#312e81",hover_color="#3730a3",command=self._ai_overlay).pack(side="right",padx=5)
 
-        # Row 3: Proposal table
-        cols=("src","ticker","name","sector","alpha","alloc","shares","cost","reason")
+        # Row 3: Proposal table (price, units, invested_amount, confidence, alpha_score)
+        cols=("src","ticker","name","sector","alpha","conf","price","alloc","shares","cost","reason")
         self.bld_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["Src","Ticker","Name","Sector","Alpha","Alloc","Qty","Cost","Reason"],
-                          [35,60,120,90,65,75,45,65,220]):
+        for c,h,w in zip(cols,["Src","Ticker","Name","Sector","Alpha","Conf","Price","Invested","Qty","Cost","Reason"],
+                          [35,55,110,82,58,42,58,68,38,58,180]):
             self.bld_tree.heading(c,text=h); self.bld_tree.column(c,width=w,anchor="w" if c in ("name","reason","sector") else "e")
         self.bld_tree.grid(row=3,column=0,sticky="nsew")
         self.bld_tree.tag_configure("etf",foreground="#818cf8")
@@ -624,7 +627,7 @@ class AlphaRanker(ctk.CTk):
         self.bld_slider_lbl.configure(text=f"{etf_pct}% ETF / {100-etf_pct}% Stocks")
 
     def _gen_build(self):
-        """Quantitative engine builds the portfolio. No LLM here — pure math."""
+        """Portfolio builder: filter by confidence, allocate with real prices, integer shares, budget cap."""
         if self.model_results is None:
             self.bld_summary.configure(text="Run the model first (Rankings tab)."); return
         try: budget=float(self.bld_budget.get().replace(",","."))
@@ -633,66 +636,46 @@ class AlphaRanker(ctk.CTk):
         except: fees=10
         max_pos=int(self.bld_max.get())
         etf_pct=int(self.bld_slider.get())/100
-        weight_method=self.bld_weight.get()
+        weight_map={"Equal Weight":"equal_weight","Risk Parity":"risk_parity","Alpha Weight":"alpha_weight"}
+        weight_method=weight_map.get(self.bld_weight.get(),"alpha_weight")
+        conf_sel=self.bld_confidence.get()
+        if "Low" in conf_sel: confidence_level="LOW"
+        elif "High" in conf_sel: confidence_level="HIGH"
+        else: confidence_level="MEDIUM"
 
-        etf_budget=budget*etf_pct
-        stock_budget=budget*(1-etf_pct)
+        from portfolio import build_suggested_portfolio
+        etf_positions=[("IWDA.AS","iShares MSCI World",0.6),("VWCE.DE","Vanguard All-World",0.4)]
+        raw=self.model_results.copy()
+        if "current_price" not in raw.columns:
+            raw["current_price"]=None
+        positions=build_suggested_portfolio(
+            model_results=raw,
+            budget=budget,
+            confidence_level=confidence_level,
+            weight_method=weight_method,
+            max_positions=max_pos,
+            etf_budget=budget*etf_pct,
+            etf_positions=etf_positions,
+        )
         proposals=[]
-
-        # ETF allocation (split between IWDA and VWCE)
-        if etf_pct>0:
-            etf_positions=[("IWDA.AS","iShares MSCI World",0.6),("VWCE.DE","Vanguard All-World",0.4)]
-            for tk,nm,split in etf_positions:
-                alloc=round(etf_budget*split)
-                if alloc<50: continue  # Skip tiny allocations
-                proposals.append({"src":"ETF","ticker":tk,"name":nm,"sector":"Global",
-                                 "alpha_score":"-","alloc":alloc,"shares":0,"reason":"Core diversification"})
-
-        # Stock allocation from model rankings
-        if stock_budget>0 and max_pos>len(proposals):
-            n_stocks=max_pos-len(proposals)
-            top_picks=self.model_results.head(n_stocks*2)  # Get more than needed for sector diversification
-
-            # Sector diversification: max 2 per sector
-            sector_count={}; selected=[]
-            for _,r in top_picks.iterrows():
-                sec=r.get("sector","Unknown")
-                if sector_count.get(sec,0)>=2: continue
-                sector_count[sec]=sector_count.get(sec,0)+1
-                selected.append(r)
-                if len(selected)>=n_stocks: break
-
-            if not selected:
-                selected=[r for _,r in top_picks.head(n_stocks).iterrows()]
-
-            # Compute weights
-            if weight_method=="Equal Weight":
-                weights=[1.0/len(selected)]*len(selected)
-            elif weight_method=="Risk Parity":
-                vols=[r.get("volatility_12m",0.2) if _ok(r.get("volatility_12m")) else 0.2 for r in selected]
-                inv_vols=[1.0/max(v,0.05) for v in vols]
-                total_iv=sum(inv_vols)
-                weights=[iv/total_iv for iv in inv_vols]
-            else:  # Alpha Weight
-                alphas=[max(r.get("predicted_return_pct",1),0.1) for r in selected]
-                total_a=sum(alphas)
-                weights=[a/total_a for a in alphas]
-
-            for r,w in zip(selected,weights):
-                alloc=round(stock_budget*w)
-                if alloc<50: continue
-                cp=r.get("current_price")
-                shares=int(alloc/cp) if _ok(cp) and cp>0 else 0
-                pred=r.get("predicted_return_pct",0)
-                conf=_conv(r.get("confidence",0))
-                proposals.append({
-                    "src":"Model","ticker":r["ticker"],"name":r.get("name","")[:22],
-                    "sector":r.get("sector","")[:14],"alpha_score":f"+{pred:.1f}%",
-                    "alloc":alloc,"shares":shares,
-                    "reason":f"Rank #{int(r['rank'])}, {conf} conviction"
-                })
-
-        # Compute costs and display
+        for p in positions:
+            inv=p.get("invested_amount") or p.get("alloc") or 0
+            units=p.get("units") or p.get("shares") or 0
+            alpha=p.get("alpha_score")
+            alpha_str=f"+{alpha*100:.1f}%" if alpha is not None else p.get("alpha_score","-")
+            if isinstance(alpha_str,(int,float)): alpha_str=f"+{float(alpha_str)*100:.1f}%" if alpha_str is not None else "-"
+            proposals.append({
+                "src":p.get("src","?"),
+                "ticker":p["ticker"],
+                "name":p.get("name","")[:22],
+                "sector":p.get("sector","")[:14],
+                "alpha_score":alpha_str,
+                "confidence":p.get("confidence"),
+                "price":p.get("price"),
+                "alloc":inv,
+                "shares":units,
+                "reason":p.get("reason","")[:40],
+            })
         self._show_proposals(proposals,budget,fees)
         self.bld_ai_status.configure(text="Quant engine done. Click 'Ask AI' for adjustments.")
 
@@ -763,20 +746,23 @@ class AlphaRanker(ctk.CTk):
         for p in proposals:
             tk=p.get("ticker",""); alloc=p.get("alloc",p.get("allocation_eur",0))
             shares=p.get("shares",0)
-            if shares==0 and alloc>0 and self.model_results is not None:
+            price=p.get("price")
+            if price is None and self.model_results is not None:
                 m=self.model_results[self.model_results["ticker"]==tk]
-                if not m.empty and _ok(m.iloc[0].get("current_price")):
-                    cp=m.iloc[0]["current_price"]
-                    if cp>0: shares=int(alloc/cp)
-            cost=alloc+fees; total+=cost
+                if not m.empty and _ok(m.iloc[0].get("current_price")): price=m.iloc[0]["current_price"]
+            if shares==0 and alloc>0 and price and price>0: shares=int(alloc/price)
+            cost=(alloc or 0)+fees; total+=cost
             alpha=p.get("alpha_score","-")
             if alpha=="-" and self.model_results is not None:
                 m=self.model_results[self.model_results["ticker"]==tk]
                 if not m.empty: alpha=f"+{m.iloc[0]['predicted_return_pct']:.1f}%"
+            conf=p.get("confidence")
+            conf_str=f"{conf:.2f}" if conf is not None and _ok(conf) else "-"
+            price_str=f"{price:,.2f}" if price is not None and _ok(price) else "-"
             src=p.get("src","?")
             tag="etf" if src=="ETF" else "ai" if src=="AI" else "stock"
             self.bld_tree.insert("","end",values=(src,tk,p.get("name","")[:22],
-                p.get("sector","")[:14],alpha,f"{alloc:,.0f}",shares,f"{cost:,.0f}",
+                p.get("sector","")[:14],alpha,conf_str,price_str,f"{alloc:,.0f}",shares,f"{cost:,.0f}",
                 p.get("reason","")[:40]),tags=(tag,))
         self.bld_summary.configure(
             text=f"Total: {total:,.0f} EUR ({n} trades, {n*fees:.0f} fees) | Budget: {budget:,.0f} EUR | "
@@ -788,13 +774,14 @@ class AlphaRanker(ctk.CTk):
         for p in self._build_proposals:
             tk=p.get("ticker",""); shares=p.get("shares",0); alloc=p.get("alloc",p.get("allocation_eur",0))
             if not tk: continue
-            price=0
-            if self.model_results is not None:
-                match=self.model_results[self.model_results["ticker"]==tk]
-                if not match.empty and _ok(match.iloc[0].get("current_price")):
-                    price=match.iloc[0]["current_price"]
-            if price<=0 and alloc>0 and shares>0: price=alloc/shares
-            if price<=0: continue
+            price=p.get("price")
+            if price is None or not _ok(price):
+                if self.model_results is not None:
+                    match=self.model_results[self.model_results["ticker"]==tk]
+                    if not match.empty and _ok(match.iloc[0].get("current_price")):
+                        price=match.iloc[0]["current_price"]
+            if (price is None or price<=0) and alloc>0 and shares>0: price=alloc/shares
+            if price is None or price<=0: continue
             if shares<=0 and alloc>0: shares=max(1,int(alloc/price))
             existing=[h for h in portfolio.get_all() if h["ticker"]==tk]
             if existing:
@@ -803,7 +790,7 @@ class AlphaRanker(ctk.CTk):
                 portfolio.update(h["id"],units=new_units,avg_price=round(new_avg,2))
             else:
                 typ="etf" if p.get("src")=="ETF" or any(x in tk.upper() for x in ["IWDA","VWCE","QQQ","SPY","VTI"]) else "stock"
-                portfolio.add(tk,p.get("name",tk),typ,shares,round(price,2),"EUR")
+                portfolio.add(tk,p.get("name",tk),typ,shares,round(float(price),2),"EUR")
             added+=1
         self._refresh_display()
         self.bld_summary.configure(text=f"Added {added} positions to portfolio!")
@@ -814,13 +801,13 @@ class AlphaRanker(ctk.CTk):
         remaining=[]
         for item in self.bld_tree.get_children():
             vals=self.bld_tree.item(item,"values")
-            # cols: src,ticker,name,sector,alpha,alloc,shares,cost,reason
-            try: alloc=int(str(vals[5]).replace(",",""))
+            # cols: src,ticker,name,sector,alpha,conf,price,alloc,shares,cost,reason
+            try: alloc=int(float(str(vals[7]).replace(",","")))
             except: alloc=0
-            try: shares=int(vals[6])
+            try: shares=int(vals[8])
             except: shares=0
             remaining.append({"src":vals[0],"ticker":vals[1],"name":vals[2],"sector":vals[3],
-                             "alpha_score":vals[4],"alloc":alloc,"shares":shares,"reason":vals[8]})
+                             "alpha_score":vals[4],"alloc":alloc,"shares":shares,"reason":vals[10]})
         self._build_proposals=remaining
 
     # ── PROJECTIONS TAB ───────────────────────────────────────
