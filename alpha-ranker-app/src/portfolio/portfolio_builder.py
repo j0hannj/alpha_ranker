@@ -184,6 +184,9 @@ def build_suggested_portfolio(
     """
     tx_params = transaction_cost_params or TransactionCostParams()
     ps = get_portfolio_settings() if get_portfolio_settings else {}
+    risk = get_risk_settings() if get_risk_settings else {}
+    if risk.get("max_sector_weight") is not None:
+        max_sector_pct = float(risk["max_sector_weight"])
     horizon = holding_horizon_days or ps.get("holding_horizon_days", 365)
     review_frequency_days = ps.get("review_frequency_days", 30)
 
@@ -374,7 +377,6 @@ def build_suggested_portfolio(
         running_sector = dict(sector_val)
         running_total = total_val
         # Turnover control: limit trading unless opportunity is significant
-        risk = get_risk_settings() if get_risk_settings else {}
         max_turnover_pct = float(risk.get("max_turnover_pct", 0.5))
         turnover_so_far = freed_capital  # from SELLs
 

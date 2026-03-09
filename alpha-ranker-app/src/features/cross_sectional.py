@@ -25,6 +25,70 @@ def rank_features(df: pd.DataFrame, feat_cols: Iterable[str]) -> pd.DataFrame:
     return ranked
 
 
+def decorrelate_features(
+    X: pd.DataFrame,
+    feat_cols: List[str],
+    method: str = "pca",
+    variance_ratio: float = 0.95,
+    fitted_transformer: Optional[object] = None,
+) -> tuple:
+    """
+    Remove redundancy via decorrelation. Returns (transformed_df, fitted_transformer).
+    If fitted_transformer is provided (e.g. from training), use it to transform; otherwise fit on X.
+    method: 'pca' -> PCA projection (orthogonal components).
+    """
+    try:
+        from sklearn.decomposition import PCA
+        from sklearn.preprocessing import StandardScaler
+    except ImportError:
+        return X.copy(), None
+    cols = [c for c in feat_cols if c in X.columns]
+    if len(cols) < 2:
+        return X.copy(), None
+    X_sub = X[cols].copy().fillna(X[cols].median())
+    X_sub = X_sub.replace([np.inf, -np.inf], np.nan).fillna(X_sub.median())
+    n_components = min(len(cols), max(1, int(X_sub.shape[0] * 0.5)))
+    if fitted_transformer is not None:
+        X_dec = fitted_transformer.transform(X_sub)
+        out = X.copy()
+        for j, c in enumerate(cols):
+            if j < X_dec.shape[1]:
+                out[c] = X_dec[:, j]
+        return out, fitted_transformer
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_sub)
+    if method == "pca":
+        n_comp = min(len(cols), X_scaled.shape[0] - 1, X_scaled.shape[1])
+        n_comp = max(1, n_comp)
+        pca = PCA(n_components=n_comp, random_state=42)
+        pca.fit(X_scaled)
+        if variance_ratio < 1.0 and pca.explained_variance_ratio_.size > 0:
+            cumvar = np.cumsum(pca.explained_variance_ratio_)
+            n_keep = max(1, min(int(np.searchsorted(cumvar, variance_ratio) + 1), n_comp))
+            pca = PCA(n_components=n_keep, random_state=42)
+            pca.fit(X_scaled)
+        X_dec = pca.transform(X_scaled)
+        class _Fitted:
+            def __init__(self, pca, scaler, cols):
+                self.pca = pca
+                self.scaler = scaler
+                self.cols = cols
+            def transform(self, X_new):
+                X_s = X_new[self.cols].copy().fillna(X_new[self.cols].median()).replace([np.inf, -np.inf], np.nan).fillna(0)
+                return self.pca.transform(self.scaler.transform(X_s))
+        fitted = _Fitted(pca, scaler, cols)
+    else:
+        fitted = None
+        X_dec = X_scaled
+    out = X.copy()
+    for j, c in enumerate(cols):
+        if j < X_dec.shape[1]:
+            out[c] = X_dec[:, j]
+        else:
+            out[c] = 0.0
+    return out, fitted
+
+
 def sector_neutralize(df: pd.DataFrame, feat_cols: Iterable[str], sector_col: str = "sector") -> pd.DataFrame:
     """Sector-neutralize features: subtract sector mean from each feature."""
     neutralized = df.copy()

@@ -1181,6 +1181,7 @@ class AlphaRanker(ctk.CTk):
         self._sett={}
         self._engine_vars = {}
         self._engine_widgets = {}
+        self._risk_widgets = {}
         row=0
 
         # Data freshness (visible last update timestamps)
@@ -1246,6 +1247,24 @@ class AlphaRanker(ctk.CTk):
                 self._sett[k]=e
                 ctk.CTkLabel(scroll,text=hint,font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
                 row+=1
+            # Risk & regime (configurable limits and regime detection thresholds)
+            rs = _engine_cfg.get_risk_settings()
+            ctk.CTkLabel(scroll,text="Risk & regime",font=("",15,"bold")).grid(row=row,column=0,columnspan=3,sticky="w",pady=(15,8)); row+=1
+            for k,l,d,hint in [
+                ("max_sector_weight","Max sector weight (0-1)","0.35","Cap per sector"),
+                ("max_turnover_pct","Max turnover (0-1)","0.5","Limit trading"),
+                ("max_position_pct","Max single position (0-1)","0.15","Cap per asset"),
+                ("bull_return_6m","Bull threshold (6m return)","0.05","Above = bull"),
+                ("bear_return_6m","Bear threshold (6m return)","-0.05","Below = bear"),
+                ("high_vol_threshold","High vol threshold","0.25","Annualized vol"),
+                ("low_vol_threshold","Low vol threshold","0.15","Annualized vol"),
+            ]:
+                ctk.CTkLabel(scroll,text=l,font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+                e=ctk.CTkEntry(scroll,width=100,font=("JetBrains Mono",10))
+                e.grid(row=row,column=1,sticky="w",pady=3); e.insert(0,str(rs.get(k,d)))
+                self._risk_widgets[k]=e
+                ctk.CTkLabel(scroll,text=hint,font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
+                row+=1
 
         # Engine / Model configuration (DB-backed)
         if _engine_cfg:
@@ -1278,10 +1297,18 @@ class AlphaRanker(ctk.CTk):
             hz_var = tk.StringVar(value=str(mset.get("prediction_horizon_months",12)))
             ctk.CTkOptionMenu(scroll,values=["3","6","12","24"],variable=hz_var,width=80).grid(row=row,column=1,sticky="w",pady=3)
             self._engine_vars["prediction_horizon_months"]=hz_var; row+=1
-            for k,l in [("winsorization","Winsorization"),("rank_normalization","Rank normalization"),("sector_neutralization","Sector neutralization"),("use_gpu","Use GPU for TCN/LSTM (auto-detect)")]:
-                v = tk.BooleanVar(value=mset.get(k,True))
+            for k,l in [("winsorization","Winsorization"),("rank_normalization","Rank normalization"),("sector_neutralization","Sector neutralization"),("feature_decorrelation","Feature decorrelation (PCA)"),("use_gpu","Use GPU for TCN/LSTM (auto-detect)")]:
+                v = tk.BooleanVar(value=mset.get(k,True if k!="feature_decorrelation" else False))
                 ctk.CTkCheckBox(scroll,text=l,variable=v,font=("",11)).grid(row=row,column=0,columnspan=2,sticky="w",padx=8,pady=2)
                 self._engine_vars[k]=v; row+=1
+            ctk.CTkLabel(scroll,text="PCA variance ratio (if decorrelation on)",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+            pca_var=ctk.CTkEntry(scroll,width=80,font=("JetBrains Mono",10)); pca_var.insert(0,str(mset.get("pca_variance_ratio",0.95)))
+            pca_var.grid(row=row,column=1,sticky="w",pady=3); self._engine_widgets["pca_variance_ratio"]=pca_var; row+=1
+            ctk.CTkLabel(scroll,text="Term structure weights (3m, 6m, 12m, 24m)",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3); row+=1
+            for h,l in [("3m","3M"),("6m","6M"),("12m","12M"),("24m","24M")]:
+                ctk.CTkLabel(scroll,text=l,font=("",10)).grid(row=row,column=0,sticky="w",padx=20,pady=1)
+                e=ctk.CTkEntry(scroll,width=60,font=("JetBrains Mono",10)); e.insert(0,str(mset.get("horizon_weight_"+h,0.5 if h=="12m" else 0.1)))
+                e.grid(row=row,column=1,sticky="w",pady=1); self._engine_widgets["horizon_weight_"+h]=e; row+=1
             for k,l,d in [("lookback_days","Lookback (days)",252),("training_window_years","Training window (years)",3),("retraining_frequency_months","Retraining (months)",3),
                 ("n_estimators","n_estimators",500),("max_depth","max_depth",5),("learning_rate","Learning rate",0.03),("ridge_alpha","Ridge alpha",10.0),
                 ("winsorize_quantile","Winsorize quantile",0.02)]:
@@ -1390,10 +1417,22 @@ class AlphaRanker(ctk.CTk):
                     "learning_rate": _ew("learning_rate", 0.03, float),
                     "ridge_alpha": _ew("ridge_alpha", 10.0, float),
                     "winsorize_quantile": _ew("winsorize_quantile", 0.02, float),
+                    "feature_decorrelation": _ev("feature_decorrelation", False),
                 }
+                if "pca_variance_ratio" in self._engine_widgets:
+                    mset["pca_variance_ratio"] = _ew("pca_variance_ratio", 0.95, float)
+                for h in ["3m","6m","12m","24m"]:
+                    if "horizon_weight_"+h in self._engine_widgets:
+                        mset["horizon_weight_"+h] = _ew("horizon_weight_"+h, 0.5 if h=="12m" else 0.1, float)
                 _engine_cfg.set_system_config(_engine_cfg.DOMAIN_MODEL, mset)
                 fset = {gname: _ev("feat_"+gname, True) for gname in _engine_cfg.FEATURE_GROUPS}
                 _engine_cfg.set_system_config(_engine_cfg.DOMAIN_FEATURE, fset)
+                risk = _engine_cfg.get_risk_settings()
+                for k, w in getattr(self, "_risk_widgets", {}).items():
+                    if hasattr(w, "get"):
+                        try: risk[k] = float(w.get())
+                        except ValueError: pass
+                _engine_cfg.set_system_config(_engine_cfg.DOMAIN_RISK, risk)
             except Exception as ex:
                 messagebox.showwarning("Engine config", f"Engine settings may not have saved: {ex}")
             # Persist investment horizon (portfolio_settings)

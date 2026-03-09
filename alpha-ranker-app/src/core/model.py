@@ -25,6 +25,7 @@ from features.cross_sectional import (
     sector_neutralize,
     factor_neutralize_scores,
     add_sector_interactions,
+    decorrelate_features,
 )
 
 warnings.filterwarnings("ignore")
@@ -430,6 +431,12 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
             Xtr_r = sector_neutralize(Xtr_r, feat_cols, "sector"); Xtr_r = Xtr_r.drop(columns=["sector"], errors="ignore")
             Xte_r = Xte_r.copy(); Xte_r["sector"] = tst["sector"].values
             Xte_r = sector_neutralize(Xte_r, feat_cols, "sector"); Xte_r = Xte_r.drop(columns=["sector"], errors="ignore")
+        if config.get("feature_decorrelation"):
+            method = config.get("decorrelation_method", "pca")
+            var_ratio = float(config.get("pca_variance_ratio", 0.95))
+            Xtr_r, _fitted = decorrelate_features(Xtr_r, feat_cols, method=method, variance_ratio=var_ratio)
+            if _fitted is not None:
+                Xte_r, _ = decorrelate_features(Xte_r, feat_cols, method=method, variance_ratio=var_ratio, fitted_transformer=_fitted)
         ytr = ytr.clip(ytr.quantile(0.02),ytr.quantile(0.98))
         models = _get_models(config)
         for name,m in models.items():
@@ -904,10 +911,15 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
 # ══════════════════════════════════════════════════════════════
 # MARKET REGIME DETECTION
 # ══════════════════════════════════════════════════════════════
-def detect_market_regime(prices, macro=None):
-    """Simple regime: bull/bear from 6m return, high_vol/low_vol from recent volatility.
+def detect_market_regime(prices, macro=None, regime_config=None):
+    """Regime from 6m return and recent vol. Thresholds from regime_config (e.g. risk_settings).
     Returns dict: regime (str), return_6m, volatility_21d, vix (if macro)."""
     out = {"regime": "unknown", "return_6m": None, "volatility_21d": None, "vix": None}
+    rc = regime_config or {}
+    bull_th = float(rc.get("bull_return_6m", 0.05))
+    bear_th = float(rc.get("bear_return_6m", -0.05))
+    high_vol = float(rc.get("high_vol_threshold", 0.25))
+    low_vol = float(rc.get("low_vol_threshold", 0.15))
     if prices is None or not hasattr(prices, "columns"):
         return out
     try:
@@ -929,9 +941,9 @@ def detect_market_regime(prices, macro=None):
         if isinstance(macro, dict) and macro.get("vix") is not None:
             out["vix"] = float(macro["vix"])
         if ret_6m is not None:
-            out["regime"] = "bull" if ret_6m > 0.05 else "bear" if ret_6m < -0.05 else "neutral"
+            out["regime"] = "bull" if ret_6m > bull_th else "bear" if ret_6m < bear_th else "neutral"
         if vol_21 is not None:
-            vol_label = "high_vol" if vol_21 > 0.25 else "low_vol" if vol_21 < 0.15 else "medium_vol"
+            vol_label = "high_vol" if vol_21 > high_vol else "low_vol" if vol_21 < low_vol else "medium_vol"
             out["regime"] = out["regime"] + "_" + vol_label
     except Exception:
         pass
@@ -979,7 +991,12 @@ def run_full_pipeline(callback=None):
         if sentiment: results["news_sentiment"]=results["ticker"].map(sentiment).fillna(0)
         H = (config or {}).get("prediction_horizon_months", 12)
         model_info = {"mode":"walk_forward_ensemble","n_features":len(feat_cols),"blend":blend,"prediction_horizon_months":H,**oos_metrics}
-        model_info["market_regime"] = detect_market_regime(prices, macro)
+        try:
+            from core.engine_config import get_risk_settings
+            regime_config = get_risk_settings()
+        except Exception:
+            regime_config = {}
+        model_info["market_regime"] = detect_market_regime(prices, macro, regime_config=regime_config)
         # Store full model state for explanations
         _store_model_state(final_models, medians, feat_cols, prices, fund_db, sector_map, yf_fund)
     else:

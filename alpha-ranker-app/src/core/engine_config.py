@@ -65,7 +65,15 @@ DEFAULT_MODEL_SETTINGS = {
     "winsorize_quantile": 0.02,
     "rank_normalization": True,
     "sector_neutralization": True,
+    "feature_decorrelation": False,
+    "decorrelation_method": "pca",
+    "pca_variance_ratio": 0.95,
     "use_gpu": True,  # When False, force CPU for TCN/LSTM/Transformer
+    # Term structure: weights for combining alpha across horizons (when multi-horizon is used)
+    "horizon_weight_3m": 0.1,
+    "horizon_weight_6m": 0.2,
+    "horizon_weight_12m": 0.5,
+    "horizon_weight_24m": 0.2,
 }
 
 DEFAULT_FEATURE_SETTINGS = {
@@ -112,6 +120,11 @@ DEFAULT_TRANSACTION_COST_SETTINGS = {
 DEFAULT_RISK_SETTINGS = {
     "max_sector_weight": 0.35,
     "max_turnover_pct": 0.5,
+    "max_position_pct": 0.15,
+    "bull_return_6m": 0.05,
+    "bear_return_6m": -0.05,
+    "high_vol_threshold": 0.25,
+    "low_vol_threshold": 0.15,
 }
 
 
