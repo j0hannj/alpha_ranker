@@ -76,18 +76,27 @@ def stability_index(rank_positions: list) -> float:
 
 def movement_classification(rank_delta: Optional[float], rank_std: float) -> str:
     """
-    Classify signal into: very_stable | stable | moderately_changing | highly_volatile | rapidly_improving | rapidly_declining.
+    Classify signal: new (no prior run) | stable | moderate | volatile | rapidly improving | rapidly declining.
+    Uses rank_delta when available (abs delta: <=5 stable, 6-15 moderate, >15 volatile); otherwise rank_std.
     """
-    if rank_delta is not None and rank_delta == rank_delta:
+    if rank_delta is None or (isinstance(rank_delta, float) and np.isnan(rank_delta)):
+        return "new"
+    if rank_delta == rank_delta:  # not nan
         if rank_delta >= RAPID_IMPROVE:
             return "rapidly improving"
         if rank_delta <= RAPID_DECLINE:
             return "rapidly declining"
+        abs_delta = abs(int(rank_delta))
+        if abs_delta <= 5:
+            return "stable"
+        if abs_delta <= 15:
+            return "moderate"
+        return "volatile"
     if np.isnan(rank_std) or rank_std <= STABILITY_LOW_STD:
-        return "very stable" if rank_std is not np.nan and rank_std <= 1.0 else "stable"
+        return "stable"
     if rank_std <= STABILITY_MED_STD:
-        return "moderately changing"
-    return "highly volatile"
+        return "moderate"
+    return "volatile"
 
 
 def add_ranking_insights(
@@ -125,6 +134,7 @@ def add_ranking_insights(
                 rank_std = stability_index(positions)
         out.at[idx, "stability_index"] = rank_std
 
+        # When no previous snapshot for this ticker, rank_delta is nan -> "new"
         classification = movement_classification(rank_delta, rank_std)
         out.at[idx, "movement_classification"] = classification
 

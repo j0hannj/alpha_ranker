@@ -109,6 +109,12 @@ DEFAULT_PORTFOLIO_SETTINGS = {
     "horizon_long_term_days": 365,
     "max_holding_duration_days": 730,
     "review_frequency_days": 30,
+    # Sell signal behavior per strategy: "disabled" | "passive" (stop-loss only) | "active" (all signals)
+    "sell_mode_long_term": "disabled",
+    "sell_mode_medium_term": "passive",
+    "sell_mode_short_term": "active",
+    "sell_mode_speculative": "active",
+    "sell_mode_dont_sell": "disabled",
 }
 
 DEFAULT_TRANSACTION_COST_SETTINGS = {

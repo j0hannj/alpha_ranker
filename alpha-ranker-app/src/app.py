@@ -581,7 +581,7 @@ class AlphaRanker(ctk.CTk):
                 self.rk_compare_lbl.configure(text="No per-model IC (single run).",text_color="#71717a")
         self.rk_tree.delete(*self.rk_tree.get_children())
         for _,r in display_df.iterrows():
-            ret=sc(r["predicted_return_pct"]); conf=r.get("confidence",0)
+            raw_ret=r["predicted_return_pct"]; ret=sc(raw_ret) if _ok(raw_ret) else None; conf=r.get("confidence",0)
             conv=_conv(conf)
             pe=f"{r['pe_forward']:.1f}" if _ok(r.get("pe_forward")) else "-"
             gr=f"{r['revenue_growth']*100:.0f}%" if _ok(r.get("revenue_growth")) else "-"
@@ -591,12 +591,12 @@ class AlphaRanker(ctk.CTk):
             an={"strongBuy":"BUY++","buy":"BUY","overweight":"OW","hold":"HOLD","underweight":"UW","sell":"SELL"}.get(str(reco),"-") if _ok(reco) else "-"
             s=r.get("news_sentiment",None)
             sn="+++ Bull" if _ok(s) and s>0.3 else "+ Pos" if _ok(s) and s>0.1 else "--- Bear" if _ok(s) and s<-0.3 else "- Neg" if _ok(s) and s<-0.1 else "~ Neut" if _ok(s) else "-"
-            if conf>=1.8 and ret>20: tag="hot"; rd=f">> +{ret}% <<"
-            elif conf>=1.2 and ret>15: tag="warm"; rd=f"+{ret}%"
-            elif conf<0.5: tag="cold"; rd=f"+{ret}%"
-            else: tag="normal"; rd=f"+{ret}%"
-            rd=r.get("rank_delta"); rd_val=None
-            if rd is not None and (not isinstance(rd,float) or rd==rd): rd_val=int(rd)
+            if ret is not None and conf>=1.8 and ret>20: tag="hot"; rd=f">> +{ret}% <<"
+            elif ret is not None and conf>=1.2 and ret>15: tag="warm"; rd=f"+{ret}%"
+            elif conf<0.5 and ret is not None: tag="cold"; rd=f"+{ret}%"
+            else: tag="normal"; rd=f"+{ret}%" if ret is not None else "—"
+            rd_delta=r.get("rank_delta"); rd_val=None
+            if rd_delta is not None and (not isinstance(rd_delta,float) or rd_delta==rd_delta): rd_val=int(rd_delta)
             ch_disp=f"+{rd_val}" if rd_val is not None and rd_val>0 else str(rd_val) if rd_val is not None and rd_val!=0 else "—"
             stab=r.get("movement_classification") or "—"
             self.rk_tree.insert("","end",values=(int(r["rank"]),r["ticker"],r.get("name","")[:18],
@@ -681,8 +681,9 @@ class AlphaRanker(ctk.CTk):
         hd=ctk.CTkFrame(d,fg_color="transparent"); hd.pack(fill="x",padx=15,pady=8)
         ctk.CTkLabel(hd,text=ticker,font=("JetBrains Mono",24,"bold")).pack(side="left")
         ctk.CTkLabel(hd,text=r.get("name",""),font=("",12),text_color="#a1a1aa").pack(side="left",padx=8)
-        pred=r.get("predicted_return_pct",0); pc="#34d399" if pred>15 else "#fbbf24" if pred>5 else "#a1a1aa"
-        ctk.CTkLabel(hd,text=f"+{pred}%",font=("JetBrains Mono",20,"bold"),text_color=pc).pack(side="right")
+        pred=r.get("predicted_return_pct",0); pred_ok=pred==pred and pred is not None
+        pc="#34d399" if pred_ok and pred>15 else "#fbbf24" if pred_ok and pred>5 else "#a1a1aa"
+        ctk.CTkLabel(hd,text=f"+{pred:.1f}%" if pred_ok else "—",font=("JetBrains Mono",20,"bold"),text_color=pc).pack(side="right")
         ctk.CTkLabel(hd,text=_conv(r.get("confidence",0)),font=("",11),text_color="#fbbf24").pack(side="right",padx=10)
         # Chart
         cf=ctk.CTkFrame(d,fg_color="#09090b",corner_radius=8); cf.pack(fill="both",expand=True,padx=15,pady=3)
@@ -1247,6 +1248,22 @@ class AlphaRanker(ctk.CTk):
                 self._sett[k]=e
                 ctk.CTkLabel(scroll,text=hint,font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
                 row+=1
+            # Sell signal configuration (per strategy)
+            sell_modes = ["disabled", "passive", "active"]
+            ctk.CTkLabel(scroll, text="Sell Signal Configuration", font=("", 15, "bold")).grid(row=row, column=0, columnspan=3, sticky="w", pady=(12, 8)); row += 1
+            ctk.CTkLabel(scroll, text="Disabled = never sell; Passive = stop-loss only; Active = all signals.", font=("", 9), text_color="#52525b").grid(row=row, column=0, columnspan=3, sticky="w", padx=8); row += 1
+            self._sell_mode_vars = {}
+            for k, label in [
+                ("sell_mode_long_term", "Long Term"),
+                ("sell_mode_medium_term", "Medium Term"),
+                ("sell_mode_short_term", "Short Term"),
+                ("sell_mode_speculative", "Speculative"),
+            ]:
+                ctk.CTkLabel(scroll, text=label, font=("", 11)).grid(row=row, column=0, sticky="w", padx=8, pady=3)
+                var = tk.StringVar(value=ps.get(k, "disabled" if "long" in k else "passive" if "medium" in k else "active"))
+                ctk.CTkOptionMenu(scroll, values=sell_modes, variable=var, width=180).grid(row=row, column=1, sticky="w", pady=3)
+                self._sell_mode_vars[k] = var
+                row += 1
             # Risk & regime (configurable limits and regime detection thresholds)
             rs = _engine_cfg.get_risk_settings()
             ctk.CTkLabel(scroll,text="Risk & regime",font=("",15,"bold")).grid(row=row,column=0,columnspan=3,sticky="w",pady=(15,8)); row+=1
@@ -1446,6 +1463,11 @@ class AlphaRanker(ctk.CTk):
                         if raw:
                             try: ps[k] = int(raw)
                             except ValueError: pass
+                for k in getattr(self, "_sell_mode_vars", {}):
+                    v = self._sell_mode_vars[k].get()
+                    if v in ("disabled", "passive", "active"):
+                        ps[k] = v
+                ps["sell_mode_dont_sell"] = "disabled"
                 _engine_cfg.set_system_config(_engine_cfg.DOMAIN_PORTFOLIO, ps)
             except Exception:
                 pass

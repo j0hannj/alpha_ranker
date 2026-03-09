@@ -182,13 +182,25 @@ def get_all_sell_alerts(
 
     If model_results is provided, current_confidence and current_alpha_score
     are looked up by ticker.
-    Holdings with strategy_type DONT_SELL never generate sell alerts.
+    Sell mode per strategy (from portfolio_settings): disabled → no alerts;
+    passive → only stop-loss (and target) alerts; active → all signals.
+    DONT_SELL and sell_mode_dont_sell=disabled always skip.
     """
+    try:
+        from core.engine_config import get_portfolio_settings
+        ps = get_portfolio_settings()
+    except Exception:
+        ps = {}
     out: List[SellAlert] = []
     for h in holdings:
         if only_open and (h.get("status") or "OPEN") != "OPEN":
             continue
-        if (h.get("strategy_type") or "").upper() == "DONT_SELL":
+        strategy = (h.get("strategy_type") or "LONG_TERM").upper().replace("-", "_")
+        if strategy == "DONT_SELL":
+            continue
+        sell_mode_key = f"sell_mode_{strategy.lower()}"
+        sell_mode = (ps.get(sell_mode_key) or "active").lower()
+        if sell_mode == "disabled":
             continue
         conf = alpha = consensus = None
         if model_results is not None and not model_results.empty and "ticker" in model_results.columns:
@@ -211,5 +223,8 @@ def get_all_sell_alerts(
         alerts = evaluate_sell_signals(
             h, current_confidence=conf, current_alpha_score=alpha, current_model_consensus=consensus
         )
+        if sell_mode == "passive":
+            allowed_reasons = {"Stop loss triggered", "Target price reached"}
+            alerts = [a for a in alerts if a.reason in allowed_reasons]
         out.extend(alerts)
     return out
