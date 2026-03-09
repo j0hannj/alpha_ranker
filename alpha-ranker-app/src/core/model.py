@@ -1,3 +1,9 @@
+from quant.features import build_features
+from quant.target import compute_target
+from quant.trainer import AlphaTrainer
+from quant.portfolio import build_portfolio
+
+
 """
 Alpha Model — Institutional Grade
 ====================================
@@ -182,6 +188,76 @@ def sector_neutralize(df, feat_cols, sector_col="sector"):
             sector_mean = neutralized.groupby(sector_col)[c].transform("mean")
             neutralized[c] = neutralized[c] - sector_mean
     return neutralized
+
+
+def factor_neutralize_scores(df, score_col="alpha_score", factor_cols=None,
+                             sector_col="sector", min_obs=30):
+    """Cross-sectional factor neutralization of alpha scores.
+
+    Removes linear exposure of the alpha score to common risk factors
+    (e.g., size, momentum, volatility, sector dummies) via a single-step
+    cross-sectional regression and returns the residuals.
+    """
+    if score_col not in df.columns:
+        return df.get(score_col, pd.Series(index=df.index))
+
+    scores = df[score_col].astype(float)
+    valid_idx = scores.replace([np.inf, -np.inf], np.nan).notna()
+    if factor_cols is None:
+        # Default factor set based on typical equity risk factors.
+        default_candidates = [
+            "log_market_cap",      # size
+            "volatility_12m",      # risk
+            "momentum_12_1",       # momentum
+            "return_12m",          # trend/quality proxy
+            "dividend_yield",      # value / income
+        ]
+        factor_cols = [c for c in default_candidates
+                       if c in df.columns and df[c].dtype in [np.float64, np.int64, float, int]]
+
+    if not factor_cols:
+        # Nothing to neutralize against
+        return scores
+
+    X = df.loc[valid_idx, factor_cols].copy()
+    # Add sector dummies if available
+    if sector_col and sector_col in df.columns:
+        sec = df.loc[valid_idx, sector_col].astype(str)
+        dums = pd.get_dummies(sec, prefix="sec", drop_first=True)
+        if len(dums.columns) > 0:
+            X = pd.concat([X, dums], axis=1)
+
+    # Drop columns that are all NaN or constant
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.dropna(axis=1, how="all")
+    nunique = X.nunique(dropna=True)
+    X = X.loc[:, nunique > 1]
+
+    if X.shape[1] == 0 or valid_idx.sum() < max(min_obs, X.shape[1] + 1):
+        return scores
+
+    # Fill remaining NaNs with column medians
+    X = X.fillna(X.median())
+    # Standardize factors to stabilize regression
+    std = X.std(ddof=0).replace(0, 1)
+    X_std = (X - X.mean()) / std
+
+    y = scores.loc[valid_idx].values
+    try:
+        X_mat = np.column_stack([np.ones(len(X_std)), X_std.values])
+        beta, _, _, _ = np.linalg.lstsq(X_mat, y, rcond=None)
+        y_hat = X_mat @ beta
+        resid = y - y_hat
+        neutral_scores = scores.copy()
+        neutral_scores.loc[valid_idx] = resid
+        # Re-standardize residuals cross-sectionally for stability
+        mu, sigma = np.median(neutral_scores), np.std(neutral_scores)
+        if sigma > 0:
+            neutral_scores = (neutral_scores - mu) / sigma
+        return neutral_scores
+    except Exception:
+        # On failure, fall back to original scores
+        return scores
 
 def add_sector_interactions(df, sector_map):
     """Add sector × macro interaction features."""
@@ -385,9 +461,15 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     X = rank_features(X, feat_cols)  # Same transform as training
     preds, blend = predict_ensemble(models_dict, X)
 
-    # Alpha score = standardized prediction
-    df["alpha_score"] = preds
-    df["predicted_return_pct"] = (preds*100).round(2)
+    # Raw alpha score before factor neutralization
+    df["alpha_score_raw"] = preds
+    # Factor-neutralized alpha score (size / risk / momentum / sector)
+    df["alpha_score"] = factor_neutralize_scores(
+        df,
+        score_col="alpha_score_raw",
+        sector_col="sector"
+    )
+    df["predicted_return_pct"] = (df["alpha_score"]*100).round(2)
     df = df.sort_values("alpha_score",ascending=False).reset_index(drop=True)
     df["alpha_rank"] = range(1,len(df)+1)
     df["rank"] = df["alpha_rank"]  # backward compat
@@ -665,7 +747,14 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         except: pass
     feat_imp = _get_feature_importance(ensemble,fcols)
     preds,blend = predict_ensemble(ensemble,X)
-    df["alpha_score"]=preds; df["predicted_return_pct"]=(preds*100).round(2)
+    df["alpha_score_raw"] = preds
+    # Factor-neutralized alpha score in simple mode as well
+    df["alpha_score"] = factor_neutralize_scores(
+        df,
+        score_col="alpha_score_raw",
+        sector_col="sector"
+    )
+    df["predicted_return_pct"] = (df["alpha_score"]*100).round(2)
     df=df.sort_values("alpha_score",ascending=False).reset_index(drop=True)
     df["alpha_rank"]=range(1,len(df)+1); df["rank"]=df["alpha_rank"]
     med,std=np.median(preds),np.std(preds)
