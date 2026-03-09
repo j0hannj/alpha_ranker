@@ -83,14 +83,18 @@ def build_suggested_portfolio(
                 if units > 0:
                     invested = units * price
                     tx_cost = estimate_transaction_cost(price, units, notional=invested, params=tx_params)
+                    review_date = (datetime.now() + timedelta(days=review_frequency_days)).strftime("%Y-%m-%d")
                     out.append({
                         "src": "ETF",
                         "ticker": ticker,
                         "name": name,
                         "sector": "Global",
                         "price": round(price, 2),
+                        "current_price": round(price, 2),
                         "units": units,
+                        "units_to_buy": units,
                         "invested_amount": round(invested, 2),
+                        "investment_amount": round(invested, 2),
                         "alloc": round(invested, 2),
                         "confidence": None,
                         "alpha_score": None,
@@ -99,6 +103,10 @@ def build_suggested_portfolio(
                         "target_price": None,
                         "stop_loss": None,
                         "holding_horizon": horizon,
+                        "expected_holding_period": horizon,
+                        "strategy_type": "LONG_TERM",
+                        "review_date": review_date,
+                        "model_consensus_score": None,
                         "reason": "Core diversification",
                     })
             else:
@@ -108,8 +116,11 @@ def build_suggested_portfolio(
                     "name": name,
                     "sector": "Global",
                     "price": None,
+                    "current_price": None,
                     "units": 0,
+                    "units_to_buy": 0,
                     "invested_amount": 0,
+                    "investment_amount": 0,
                     "alloc": round(alloc, 2),
                     "confidence": None,
                     "alpha_score": None,
@@ -118,6 +129,10 @@ def build_suggested_portfolio(
                     "target_price": None,
                     "stop_loss": None,
                     "holding_horizon": horizon,
+                    "expected_holding_period": horizon,
+                    "strategy_type": "LONG_TERM",
+                    "review_date": None,
+                    "model_consensus_score": None,
                     "reason": "Core diversification (price unknown)",
                 })
 
