@@ -211,10 +211,10 @@ class AlphaRanker(ctk.CTk):
                       command=self._add_dialog).pack(side="right",padx=3)
         ctk.CTkButton(bf,text="Delete",width=70,height=26,font=("",10),fg_color="#991b1b",
                       command=self._del_holding).pack(side="right",padx=3)
-        cols=("ticker","type","qty","pru","price","value","pnl","pnl_pct")
+        cols=("ticker","type","qty","pru","price","price_updated","value","pnl","pnl_pct")
         self.pf_tree=ttk.Treeview(tf,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["Ticker","Type","Qty","Cost","Price","Value","P&L","P&L%"],
-                          [75,45,55,75,75,80,80,65]):
+        for c,h,w in zip(cols,["Ticker","Type","Qty","Cost","Price","Last update","Value","P&L","P&L%"],
+                          [70,42,48,68,68,115,72,72,58]):
             self.pf_tree.heading(c,text=h); self.pf_tree.column(c,width=w,anchor="e" if c not in ("ticker","type") else "w")
         self.pf_tree.grid(row=1,column=0,sticky="nsew",padx=5,pady=5)
         self.pf_tree.bind("<Double-1>",self._edit_holding)
@@ -247,10 +247,11 @@ class AlphaRanker(ctk.CTk):
         self.pf_tree.delete(*self.pf_tree.get_children())
         for h in pnl["holdings"]:
             cur="\u20ac" if h["currency"]=="EUR" else "$" if h["currency"]=="USD" else "\u00a3"
+            price_ts=h.get("price_timestamp") or ""
             self.pf_tree.insert("","end",iid=str(h["id"]),
                 values=(h["ticker"],h["type"].upper(),h["units"],f"{h['avg_price']}{cur}",
-                       f"{h.get('current_price','?')}{cur}",f"{h['value']:,.0f}\u20ac",
-                       f"{h['pnl']:+,.0f}\u20ac",f"{h['pnl_pct']:+.1f}%"),
+                       f"{h.get('current_price','?')}{cur}",price_ts[:16] if price_ts else "—",
+                       f"{h['value']:,.0f}\u20ac",f"{h['pnl']:+,.0f}\u20ac",f"{h['pnl_pct']:+.1f}%"),
                 tags=("pos" if h["pnl"]>=0 else "neg",))
         self.pf_sec.configure(state="normal"); self.pf_sec.delete("1.0","end")
         for s in pnl["sectors"]:
@@ -279,7 +280,8 @@ class AlphaRanker(ctk.CTk):
                 elif fc=="GBp" and hc=="GBP": pr=round(pr/100,2)
                 elif fc=="GBp" and hc=="EUR": pr=round(pr/100*self.gbp_rate,2)
                 elif fc=="EUR" and hc=="USD": pr=round(pr*self.fx_rate,2)
-                portfolio.update_price(t,pr)
+                ts=p.get("date") or p.get("price_timestamp")
+                portfolio.update_price(t,pr,price_timestamp=ts)
             failed=[t for t in tickers if t not in prices]
             if failed:
                 self.after(0,lambda:self._recover(failed))
@@ -478,8 +480,8 @@ class AlphaRanker(ctk.CTk):
                       fg_color="#4f46e5",command=self._run_model).pack(side="left")
         self.rk_status=ctk.CTkLabel(top,text="Not trained",font=("",10),text_color="#71717a")
         self.rk_status.pack(side="left",padx=12)
-        self.rk_data_updated=ctk.CTkLabel(top,text="",font=("",9),text_color="#52525b")
-        self.rk_data_updated.pack(side="left",padx=8)
+        self.rk_data_updated=ctk.CTkLabel(top,text="",font=("",11),text_color="#34d399")
+        self.rk_data_updated.pack(side="left",padx=12)
         ff=ctk.CTkFrame(top,fg_color="transparent"); ff.pack(side="right")
         self.hz_var=ctk.StringVar(value="12")
         for m in ["3","6","12","24"]:
@@ -498,22 +500,24 @@ class AlphaRanker(ctk.CTk):
         self.rk_tree.tag_configure("cold",foreground="#71717a")
 
     def _refresh_data_updated_label(self):
-        """Set Rankings tab label to last data update time from model_info or cache."""
+        """Set Rankings tab label to last data update time. Always show when we have model data."""
         try:
+            if not hasattr(self,"rk_data_updated"): return
             info = self.model_info or {}
             fresh = info.get("data_freshness") or {}
+            disp = None
             if isinstance(fresh, dict):
                 p = fresh.get("prices") or {}
                 disp = p.get("display") if isinstance(p, dict) else None
-            else:
-                disp = None
             if disp:
-                self.rk_data_updated.configure(text=f"Market data last updated: {disp}")
+                self.rk_data_updated.configure(text=f"Market data last updated: {disp}", text_color="#34d399")
             elif info.get("saved_at"):
                 from datetime import datetime
                 try: t = datetime.fromisoformat(str(info["saved_at"]).replace("Z","+00:00")).strftime("%Y-%m-%d %H:%M")
                 except: t = str(info["saved_at"])[:16]
-                self.rk_data_updated.configure(text=f"Data last updated: {t}")
+                self.rk_data_updated.configure(text=f"Data last updated: {t}", text_color="#34d399")
+            elif self.model_results is not None and not self.model_results.empty:
+                self.rk_data_updated.configure(text="Data loaded (timestamp unknown)", text_color="#71717a")
             else:
                 self.rk_data_updated.configure(text="")
         except Exception:
@@ -653,6 +657,8 @@ class AlphaRanker(ctk.CTk):
         ctk.CTkLabel(hdr,text="QUANT ENGINE",font=("",10,"bold"),text_color="#34d399").pack(side="left",padx=10)
         self.bld_ai_status=ctk.CTkLabel(hdr,text="",font=("",10),text_color="#818cf8")
         self.bld_ai_status.pack(side="left",padx=20)
+        self.bld_data_as_of=ctk.CTkLabel(hdr,text="",font=("",9),text_color="#52525b")
+        self.bld_data_as_of.pack(side="left",padx=8)
         ctk.CTkButton(hdr,text="Ask AI to Adjust",width=140,height=26,font=("",10),
                       fg_color="#312e81",hover_color="#3730a3",command=self._ai_overlay).pack(side="right",padx=5)
 
@@ -665,7 +671,8 @@ class AlphaRanker(ctk.CTk):
         self.bld_tree.grid(row=3,column=0,sticky="nsew")
         self.bld_tree.tag_configure("etf",foreground="#818cf8")
         self.bld_tree.tag_configure("stock",foreground="#e4e4e7")
-        self.bld_tree.tag_configure("ai",foreground="#c084fc")  # AI adjusted
+        self.bld_tree.tag_configure("ai",foreground="#c084fc")
+        self.bld_tree.tag_configure("neg",foreground="#f87171")  # SELL
 
         # Row 4: Bottom buttons
         bb=ctk.CTkFrame(tab,fg_color="transparent"); bb.grid(row=4,column=0,sticky="ew",pady=6)
@@ -710,6 +717,14 @@ class AlphaRanker(ctk.CTk):
         raw=self.model_results.copy()
         if "current_price" not in raw.columns:
             raw["current_price"]=None
+        # If no prices available, fetch live so build can propose candidates
+        if raw["current_price"].isna().all() or (raw["current_price"]<=0).all():
+            try:
+                tickers=raw["ticker"].dropna().unique().tolist()[:80]
+                if tickers:
+                    prices=data.fetch_prices(tickers)
+                    raw["current_price"]=raw["ticker"].map(lambda t: prices.get(t,{}).get("price"))
+            except Exception: pass
         positions=build_suggested_portfolio(
             model_results=raw,
             budget=budget,
@@ -720,6 +735,7 @@ class AlphaRanker(ctk.CTk):
             etf_positions=etf_positions,
             transaction_cost_params=tx_params,
             holding_horizon_days=horizon_days,
+            existing_holdings=portfolio.get_all(),
         )
         proposals=[]
         for p in positions:
@@ -733,8 +749,10 @@ class AlphaRanker(ctk.CTk):
             if strat_override and str(strat_override) != "Auto":
                 strat=str(strat_override)
             holding_days=p.get("expected_holding_period") or p.get("holding_horizon") or horizon_days
+            action=p.get("action") or "BUY"
             proposals.append({
-                "src":p.get("src","?"),
+                "action":action,
+                "src": "SELL" if action=="SELL" else p.get("src","?"),
                 "ticker":p["ticker"],
                 "name":p.get("name","")[:22],
                 "sector":p.get("sector","")[:14],
@@ -757,6 +775,12 @@ class AlphaRanker(ctk.CTk):
             })
         self._show_proposals(proposals,budget,fees)
         self.bld_ai_status.configure(text="Quant engine done. Click 'Ask AI' for adjustments.")
+        info=self.model_info or {}
+        fresh=info.get("data_freshness") or {}
+        disp=fresh.get("prices",{}).get("display") if isinstance(fresh.get("prices"),dict) else None
+        if disp: self.bld_data_as_of.configure(text=f"Data as of: {disp}")
+        elif info.get("saved_at"): self.bld_data_as_of.configure(text=f"Data as of: {str(info['saved_at'])[:16]}")
+        else: self.bld_data_as_of.configure(text="")
 
     def _ai_overlay(self):
         """LLM reviews the quant proposal and suggests adjustments."""
@@ -844,7 +868,7 @@ class AlphaRanker(ctk.CTk):
             stop=p.get("stop_loss"); stop_str=f"{stop:,.2f}" if stop is not None and _ok(stop) else "-"
             consensus=p.get("model_consensus_score"); consensus_str=f"{consensus:.2f}" if consensus is not None and _ok(consensus) else "-"
             src=p.get("src","?")
-            tag="etf" if src=="ETF" else "ai" if src=="AI" else "stock"
+            tag="etf" if src=="ETF" else "neg" if src=="SELL" else "ai" if src=="AI" else "stock"
             self.bld_tree.insert("","end",values=(src,tk,p.get("name","")[:22],
                 p.get("sector","")[:14],alpha,conf_str,price_str,f"{alloc:,.0f}",shares,horizon_str,target_str,stop_str,consensus_str,
                 p.get("reason","")[:40]),tags=(tag,))
@@ -856,6 +880,7 @@ class AlphaRanker(ctk.CTk):
         if not self._build_proposals: return
         added=0
         for p in self._build_proposals:
+            if p.get("action")=="SELL": continue
             tk=p.get("ticker",""); shares=p.get("shares",0); alloc=p.get("alloc",p.get("allocation_eur",0))
             if not tk: continue
             price=p.get("price")
@@ -1054,6 +1079,26 @@ class AlphaRanker(ctk.CTk):
         self._engine_vars = {}
         self._engine_widgets = {}
         row=0
+
+        # Data freshness (visible last update timestamps)
+        ctk.CTkLabel(scroll,text="Data freshness",font=("",15,"bold")).grid(row=row,column=0,columnspan=3,sticky="w",pady=(5,8)); row+=1
+        info=getattr(self,"model_info",None) or {}
+        fresh=info.get("data_freshness") or {}
+        def _disp(dataset):
+            d=fresh.get(dataset) if isinstance(fresh,dict) else {}
+            return (d.get("display") or d.get("last_update_timestamp","—")[:16]) if isinstance(d,dict) else "—"
+        ctk.CTkLabel(scroll,text="Prices last updated:",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+        ctk.CTkLabel(scroll,text=_disp("prices"),font=("JetBrains Mono",10),text_color="#34d399").grid(row=row,column=1,sticky="w",pady=3); row+=1
+        ctk.CTkLabel(scroll,text="Fundamentals last updated:",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+        ctk.CTkLabel(scroll,text=_disp("fundamentals"),font=("JetBrains Mono",10),text_color="#34d399").grid(row=row,column=1,sticky="w",pady=3); row+=1
+        ctk.CTkLabel(scroll,text="Macro last updated:",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+        ctk.CTkLabel(scroll,text=_disp("macro"),font=("JetBrains Mono",10),text_color="#34d399").grid(row=row,column=1,sticky="w",pady=3); row+=1
+        if not fresh and info.get("saved_at"):
+            ctk.CTkLabel(scroll,text="Cache saved:",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+            try: t=__import__("datetime").datetime.fromisoformat(str(info["saved_at"]).replace("Z","+00:00")).strftime("%Y-%m-%d %H:%M")
+            except: t=str(info.get("saved_at",""))[:16]
+            ctk.CTkLabel(scroll,text=t,font=("JetBrains Mono",10),text_color="#34d399").grid(row=row,column=1,sticky="w",pady=3); row+=1
+        row+=1
 
         # API Keys
         ctk.CTkLabel(scroll,text="API Keys",font=("",15,"bold")).grid(row=row,column=0,columnspan=3,sticky="w",pady=(5,8)); row+=1

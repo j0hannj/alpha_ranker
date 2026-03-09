@@ -48,19 +48,79 @@ def build_suggested_portfolio(
     min_return_vs_cost_multiple: float = 3.0,
     holding_horizon_days: Optional[int] = None,
     default_stop_loss_pct: float = 10.0,
+    existing_holdings: Optional[List[dict]] = None,
 ) -> List[dict]:
     """
-    Build a suggested portfolio from alpha model results.
-    Rejects buys where expected_return < min_return_vs_cost_multiple * transaction_cost.
+    Build a suggested portfolio from alpha model results. If existing_holdings is provided,
+    identifies weak assets (negative alpha, low confidence, poor consensus) and proposes SELL
+    (excluding DONT_SELL); freed capital is added to budget for BUY candidates.
     Each recommendation includes: ticker, current_price, units_to_buy, investment_amount,
     confidence, expected_return, expected_holding_period, strategy_type, target_price,
-    stop_loss, review_date, model_consensus_score.
+    stop_loss, review_date, model_consensus_score. action is "BUY" or "SELL".
     """
-    stock_budget = budget - etf_budget
     tx_params = transaction_cost_params or TransactionCostParams()
     ps = get_portfolio_settings() if get_portfolio_settings else {}
     horizon = holding_horizon_days or ps.get("holding_horizon_days", 365)
     review_frequency_days = ps.get("review_frequency_days", 30)
+
+    # Portfolio improvement: consider selling weak holdings to free capital
+    freed_capital = 0.0
+    holdings = existing_holdings or []
+    model_df = model_results if model_results is not None and not model_results.empty else pd.DataFrame()
+    for h in holdings:
+        if (h.get("strategy_type") or "").upper() == "DONT_SELL":
+            continue
+        ticker = h.get("ticker")
+        if not ticker:
+            continue
+        row = model_df[model_df["ticker"] == ticker] if not model_df.empty else pd.DataFrame()
+        alpha = None
+        confidence = None
+        consensus = None
+        if not row.empty:
+            alpha = row.iloc[0].get("alpha_score")
+            if pd.isna(alpha): alpha = (row.iloc[0].get("predicted_return_pct") or 0) / 100.0
+            confidence = row.iloc[0].get("confidence")
+            for c in ("reliability_score", "model_agreement_score"):
+                if c in row.columns and pd.notna(row.iloc[0].get(c)):
+                    consensus = float(row.iloc[0][c])
+                    break
+        weak = (alpha is not None and alpha < 0) or (confidence is not None and confidence < -0.5) or (consensus is not None and consensus < 0.3)
+        if weak:
+            units = h.get("units") or 0
+            price = h.get("current_price") or h.get("avg_price") or 0
+            if units and price:
+                freed_capital += float(units) * float(price)
+            reasons = []
+            if alpha is not None and alpha < 0: reasons.append("negative alpha")
+            if confidence is not None and confidence < -0.5: reasons.append("low confidence")
+            if consensus is not None and consensus < 0.3: reasons.append("poor model consensus")
+            out.append({
+                "action": "SELL",
+                "src": "Model",
+                "ticker": ticker,
+                "name": (h.get("name") or ticker)[:22],
+                "sector": (h.get("sector") or "")[:14],
+                "price": round(float(price), 2) if price else None,
+                "current_price": round(float(price), 2) if price else None,
+                "units": int(units) if units else 0,
+                "units_to_buy": 0,
+                "invested_amount": round(float(units) * float(price), 2) if units and price else 0,
+                "investment_amount": 0,
+                "confidence": confidence,
+                "alpha_score": alpha,
+                "expected_return": None,
+                "target_price": h.get("target_price"),
+                "stop_loss": h.get("stop_loss"),
+                "holding_horizon": horizon,
+                "expected_holding_period": horizon,
+                "strategy_type": h.get("strategy_type", "MEDIUM_TERM"),
+                "review_date": None,
+                "model_consensus_score": round(consensus, 3) if consensus is not None else None,
+                "reason": "Consider selling: " + ", ".join(reasons) if reasons else "Weak signal",
+            })
+
+    stock_budget = budget - etf_budget + freed_capital
     if stock_budget < 0:
         stock_budget = 0
 
@@ -85,6 +145,7 @@ def build_suggested_portfolio(
                     tx_cost = estimate_transaction_cost(price, units, notional=invested, params=tx_params)
                     review_date = (datetime.now() + timedelta(days=review_frequency_days)).strftime("%Y-%m-%d")
                     out.append({
+                        "action": "BUY",
                         "src": "ETF",
                         "ticker": ticker,
                         "name": name,
@@ -111,6 +172,7 @@ def build_suggested_portfolio(
                     })
             else:
                 out.append({
+                    "action": "BUY",
                     "src": "ETF",
                     "ticker": ticker,
                     "name": name,
@@ -211,6 +273,7 @@ def build_suggested_portfolio(
             p["reason"] = f"Rank signal, confidence {p.get('confidence'):.2f}" if p.get("confidence") is not None else "Rank signal"
             if mult_used < min_return_vs_cost_multiple:
                 p["reason"] = (p.get("reason", "") or "") + " (relaxed tx)"
+            p["action"] = "BUY"
             out.append(p)
 
         relaxed_multiple = 2.0  # fallback when 3x would yield zero candidates
@@ -244,6 +307,43 @@ def build_suggested_portfolio(
                 added_this_pass += 1
             if added_this_pass > 0:
                 break
+
+        # If still no BUY candidates but we have budget and signals, propose top N by alpha (price TBD)
+        n_buys = sum(1 for o in out if o.get("action") == "BUY" and o.get("src") == "Model")
+        if stock_budget > 0 and n_buys == 0 and not model_results.empty:
+            df_low = ConfidenceFilter("LOW").filter(model_results)
+            if "alpha_score" not in df_low.columns and "predicted_return_pct" in df_low.columns:
+                df_low = df_low.copy()
+                df_low["alpha_score"] = df_low["predicted_return_pct"] / 100.0
+            df_low = df_low.sort_values("alpha_score", ascending=False).head(max_positions or 10)
+            for _, row in df_low.iterrows():
+                ticker = row.get("ticker")
+                if not ticker or any(o.get("ticker") == ticker and o.get("action") == "BUY" for o in out):
+                    continue
+                out.append({
+                    "action": "BUY",
+                    "src": "Model",
+                    "ticker": ticker,
+                    "name": (row.get("name") or ticker)[:22],
+                    "sector": (row.get("sector") or "")[:14],
+                    "price": None,
+                    "current_price": row.get("current_price"),
+                    "units": 0,
+                    "units_to_buy": 0,
+                    "invested_amount": 0,
+                    "investment_amount": 0,
+                    "confidence": row.get("confidence"),
+                    "alpha_score": float(row["alpha_score"]) if pd.notna(row.get("alpha_score")) else None,
+                    "expected_return": round(float(row["alpha_score"]) * 100, 2) if pd.notna(row.get("alpha_score")) else None,
+                    "target_price": None,
+                    "stop_loss": None,
+                    "holding_horizon": horizon,
+                    "expected_holding_period": horizon,
+                    "strategy_type": strategy_type_from_horizon(horizon),
+                    "review_date": (datetime.now() + timedelta(days=review_frequency_days)).strftime("%Y-%m-%d"),
+                    "model_consensus_score": round(float(row["reliability_score"]), 3) if "reliability_score" in row.columns and pd.notna(row.get("reliability_score")) else (round(float(row["model_agreement_score"]), 3) if "model_agreement_score" in row.columns and pd.notna(row.get("model_agreement_score")) else None),
+                    "reason": "Price needed - refresh data and re-run to get units",
+                })
 
     return out
 
