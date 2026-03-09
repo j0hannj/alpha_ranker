@@ -728,38 +728,83 @@ def explain_ranking_context(ticker, models_dict, medians, feat_cols, prices,
 # ══════════════════════════════════════════════════════════════
 # PORTFOLIO PROJECTIONS
 # ══════════════════════════════════════════════════════════════
-def project_portfolio_prices(holdings_pnl, model_results, horizons=[3,6,12,24]):
-    """Project future prices per holding based on alpha model predictions."""
-    # ETF expected returns by ticker (multiple aliases for robustness)
+# Pipeline: model prediction (H-month return) → return projection → price projection → UI.
+# Model output: predicted_return_pct = 100 * alpha_score, where alpha_score is the model's
+# predicted SIMPLE return over the training horizon (H months). So predicted_return_pct=12
+# means 12% return over H months, NOT annualized. We never interpret a 1-year prediction
+# as a 2-year return; we compound explicitly: projected_price = current_price * (1+r)^(m/H).
+def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_info=None):
+    """Project future prices per holding from model predictions.
+    Uses model's prediction horizon (H months) so a 1-year prediction is never used as 2-year.
+    Formula: projected_price = current_price * (1 + r_H)^(m/H), with r_H = model return over H months.
+    """
+    if horizons is None:
+        horizons = [3, 6, 12, 24]
+    H = 12
+    if isinstance(model_info, dict) and model_info.get("prediction_horizon_months") is not None:
+        H = int(model_info["prediction_horizon_months"])
+    if H <= 0:
+        H = 12
     etf_defaults = {"6AQQ.DE":0.11,"ANX.PA":0.11,"UST.PA":0.11,"NDXH":0.11,
-                    "IWDA.AS":0.08,"SWDA.L":0.08,
-                    "VWCE.DE":0.08,"VWCE.L":0.08}
-    # Also match by name fragment
+                    "IWDA.AS":0.08,"SWDA.L":0.08,"VWCE.DE":0.08,"VWCE.L":0.08}
     etf_name_match = {"nasdaq":0.11, "msci world":0.08, "all-world":0.08, "ftse all":0.08}
     projections = []
-    for h in holdings_pnl.get("holdings",[]):
-        t=h["ticker"]; cp=h.get("current_price") or h.get("avg_price",0)
-        if cp<=0: continue
-        annual_ret = None
-        if model_results is not None and hasattr(model_results,"empty"):
-            match = model_results[model_results["ticker"]==t]
-            if not match.empty: annual_ret = match.iloc[0]["predicted_return_pct"]/100
-        if annual_ret is None:
-            annual_ret = etf_defaults.get(t)
-        if annual_ret is None:
-            # Try name matching for ETFs
-            name_lower = h.get("name","").lower()
+    for h in holdings_pnl.get("holdings", []):
+        t = h["ticker"]
+        cp = h.get("current_price") or h.get("avg_price", 0)
+        if cp <= 0:
+            continue
+        r_H = None
+        from_model = False
+        if model_results is not None and hasattr(model_results, "empty") and not model_results.empty:
+            match = model_results[model_results["ticker"] == t]
+            if not match.empty:
+                raw_pct = match.iloc[0].get("predicted_return_pct")
+                if raw_pct is not None and pd.notna(raw_pct):
+                    r_H = float(raw_pct) / 100.0
+                    from_model = True
+        if r_H is None:
+            r_H = etf_defaults.get(t)
+        if r_H is None:
+            name_lower = (h.get("name") or "").lower()
             for frag, ret in etf_name_match.items():
                 if frag in name_lower:
-                    annual_ret = ret; break
-        if annual_ret is None:
-            annual_ret = 0.08  # Global default
-        proj = {"ticker":t,"name":h.get("name",t),"current_price":cp,"currency":h.get("currency","EUR"),
-                "units":h.get("units",0),"annual_return":round(annual_ret,4),"horizons":{}}
+                    r_H = ret
+                    break
+        if r_H is None:
+            r_H = 0.08
+        proj = {
+            "ticker": t,
+            "name": h.get("name", t),
+            "current_price": cp,
+            "currency": h.get("currency", "EUR"),
+            "units": h.get("units", 0),
+            "annual_return": round(r_H, 4),
+            "horizons": {},
+            "projection_trace": {
+                "model_horizon_months": H,
+                "model_return_pct": round(r_H * 100, 2),
+                "output_interpretation": f"Model predicted {H}-month simple return (not annualized). Applied once for {H}M; compounded for longer horizons.",
+                "formula": "projected_price = current_price * (1 + r_H)^(display_months / H)",
+                "from_model": from_model,
+                "per_horizon": {},
+            },
+        }
         for m in horizons:
-            factor = (1+annual_ret)**(m/12)
-            proj["horizons"][f"{m}M"] = {"price":round(cp*factor,2),
-                "value":round(cp*factor*h.get("units",0),2),"gain_pct":round((factor-1)*100,1)}
+            if m <= 0:
+                continue
+            factor = (1 + r_H) ** (m / H)
+            projected_price = cp * factor
+            proj["horizons"][f"{m}M"] = {
+                "price": round(projected_price, 2),
+                "value": round(projected_price * h.get("units", 0), 2),
+                "gain_pct": round((factor - 1) * 100, 1),
+            }
+            proj["projection_trace"]["per_horizon"][f"{m}M"] = {
+                "formula": f"(1 + {r_H:.4f})^({m}/{H}) = {factor:.4f}",
+                "factor": round(factor, 4),
+                "projected_price": round(projected_price, 2),
+            }
         projections.append(proj)
     return projections
 
@@ -877,7 +922,7 @@ def run_full_pipeline(callback=None):
                                         macro,sector_map,list(yf_fund.keys()),
                                         yf_info=yf_fund,callback=callback,config=config)
         if sentiment: results["news_sentiment"]=results["ticker"].map(sentiment).fillna(0)
-        model_info = {"mode":"walk_forward_ensemble","n_features":len(feat_cols),"blend":blend,**oos_metrics}
+        model_info = {"mode":"walk_forward_ensemble","n_features":len(feat_cols),"blend":blend,"prediction_horizon_months":12,**oos_metrics}
         # Store full model state for explanations
         _store_model_state(final_models, medians, feat_cols, prices, fund_db, sector_map, yf_fund)
     else:
@@ -893,6 +938,7 @@ def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,dat
     r = train_simple(prices,yf_fund,macro,callback,sentiment)
     if r[0] is None: return None,None,{"error":"Training failed"},macro
     ensemble,med,fc,results,feat_imp,oos = r
+    oos["prediction_horizon_months"] = 12
     if data_freshness: oos["data_freshness"] = data_freshness
     _store_model_state(ensemble, med, fc, prices, {}, sector_map, yf_fund)
     _save_cache(results,feat_imp,oos,macro)

@@ -1025,8 +1025,8 @@ class AlphaRanker(ctk.CTk):
         ctk.CTkButton(top,text="Refresh",width=90,height=28,font=("",10),command=self._upd_proj).pack(side="right")
         cols=("ticker","name","price","units","val","3m","6m","12m","24m","ret")
         self.prj_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["Ticker","Name","Price","Qty","Value","3M","6M","12M","24M","Ann"],
-                          [60,130,70,45,75,75,75,80,80,60]):
+        for c,h,w in zip(cols,["Ticker","Name","Price","Qty","Value","3M","6M","12M","24M","Model ret"],
+                          [60,130,70,45,75,75,75,80,80,68]):
             self.prj_tree.heading(c,text=h); self.prj_tree.column(c,width=w,anchor="e" if c not in ("ticker","name") else "w")
         self.prj_tree.grid(row=1,column=0,sticky="nsew")
         self.prj_tree.tag_configure("bull",foreground="#34d399"); self.prj_tree.tag_configure("bear",foreground="#f87171"); self.prj_tree.tag_configure("flat",foreground="#fbbf24")
@@ -1036,9 +1036,12 @@ class AlphaRanker(ctk.CTk):
     def _upd_proj(self):
         if self.model_results is None or self._portfolio_pnl is None:
             self.prj_lbl.configure(text="Run model first."); return
-        projs=model.project_portfolio_prices(self._portfolio_pnl,self.model_results)
+        projs=model.project_portfolio_prices(self._portfolio_pnl,self.model_results,model_info=self.model_info)
         self.prj_tree.delete(*self.prj_tree.get_children())
         tn=t12=0
+        H = 12
+        if isinstance(self.model_info, dict) and self.model_info.get("prediction_horizon_months") is not None:
+            H = int(self.model_info["prediction_horizon_months"])
         for p in projs:
             h3,h6=p["horizons"].get("3M",{}),p["horizons"].get("6M",{})
             h12,h24=p["horizons"].get("12M",{}),p["horizons"].get("24M",{})
@@ -1050,7 +1053,7 @@ class AlphaRanker(ctk.CTk):
                 f"{h12.get('price','?')}{cu} ({h12.get('gain_pct',0):+.1f}%)",f"{h24.get('price','?')}{cu} ({h24.get('gain_pct',0):+.1f}%)",
                 f"{ar*100:+.1f}%"),tags=(tag,))
         g=((t12/tn-1)*100) if tn>0 else 0
-        self.prj_lbl.configure(text=f"12M: {t12:,.0f}EUR ({g:+.1f}%) | Now: {tn:,.0f}EUR")
+        self.prj_lbl.configure(text=f"12M: {t12:,.0f}EUR ({g:+.1f}%) | Now: {tn:,.0f}EUR | Model horizon: {H}M (projections compounded from {H}M return)")
 
     # ── BACKTEST TAB ──────────────────────────────────────────
     def _init_backtest(self):

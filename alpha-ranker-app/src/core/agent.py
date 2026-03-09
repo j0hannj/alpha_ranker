@@ -104,6 +104,26 @@ You don't need to dump all the numbers — pick the 3-5 most impactful drivers a
 into your analysis like a quant analyst would in a research note. If the data is there but
 the user didn't ask about that specific stock, don't force it — use it only when relevant.
 
+== PROJECTION PIPELINE (EXPLAINABILITY) ==
+Forward price projections are computed from the model prediction, NOT by guessing or clipping.
+
+1. MODEL OUTPUT: The model predicts a single number per stock — the SIMPLE return over the
+   training horizon (default 12 months). This is stored as predicted_return_pct (e.g. 12 = 12%
+   over 12 months). It is NOT annualized and must NEVER be interpreted as a 2-year return.
+
+2. RETURN TO PRICE: projected_price = current_price * (1 + r_H)^(display_months / H)
+   where r_H = model predicted return over H months (decimal). For 12M: factor = 1+r. For 24M:
+   factor = (1+r)^2 (same 12M return compounded). A 1-year prediction is never used as 2-year.
+
+3. VARIABLE TRACE: For each holding the system can expose: model_horizon_months (H),
+   model_return_pct, formula used, and per-horizon factor. Use this to answer "how was the
+   projection computed?" or "why does X show -Y%?" — explain which variables were used and
+   how they were transformed. If the model predicted an extreme return (e.g. -81%), the
+   projection is faithfully applying it; the cause is the model output, not the projection.
+
+4. MULTI-HORIZON: Today the model has one horizon (12M). Future versions may have
+   predicted_return_3m, _6m, _12m, _24m so each display horizon uses its own prediction.
+
 == AVAILABLE ACTIONS ==
 You can request actions by including these tags in your response:
 [ACTION:refresh_prices] - Refresh all portfolio prices from Yahoo Finance
@@ -246,6 +266,13 @@ def build_context(portfolio_pnl=None, model_results=None, macro=None,
         ctx += "\n== TOP FEATURES ==\n"
         for feat,imp in feat_imp.head(8).items():
             ctx += f"  {feat}: {imp:.4f}\n"
+
+    # Projection pipeline (for explainability)
+    if model_info and isinstance(model_info, dict) and model_info.get("prediction_horizon_months") is not None:
+        H = model_info["prediction_horizon_months"]
+        ctx += f"\n== PROJECTION CONFIG ==\n"
+        ctx += f"  Model prediction horizon: {H} months. predicted_return_pct is the {H}-month simple return (not annualized).\n"
+        ctx += f"  Projections: projected_price = current_price * (1 + r)^{{m/{H}}}. Never interpret 1-year as 2-year.\n"
 
     # Extra context (news, analysis results)
     if extra: ctx += "\n" + extra
