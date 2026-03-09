@@ -207,6 +207,13 @@ def fetch_all_data(tickers=None, years=5, callback=None):
         sentiment = batch_sentiment(list(fundamentals.keys())[:150], callback)
     except: pass
 
+    now_iso = datetime.now().isoformat()
+    now_display = datetime.now().strftime("%Y-%m-%d %H:%M")
+    data_freshness = {
+        "prices": {"last_update_timestamp": now_iso, "data_source": "Yahoo Finance", "display": now_display},
+        "fundamentals": {"last_update_timestamp": now_iso, "data_source": "Yahoo Finance", "display": now_display},
+        "macro": {"last_update_timestamp": now_iso, "data_source": "FRED", "display": now_display},
+    }
     return {
         "tickers": universe_tickers,
         "prices": prices,
@@ -214,5 +221,6 @@ def fetch_all_data(tickers=None, years=5, callback=None):
         "macro": macro,
         "fx": fx,
         "sentiment": sentiment,
-        "fetched_at": datetime.now().isoformat(),
+        "fetched_at": now_iso,
+        "data_freshness": data_freshness,
     }

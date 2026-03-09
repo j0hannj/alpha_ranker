@@ -26,6 +26,7 @@ _HOLDINGS_EXTRA_COLUMNS = [
     ("transaction_cost", "REAL"),
     ("status", "TEXT DEFAULT 'OPEN'"),
     ("review_date", "TEXT"),
+    ("price_timestamp", "TEXT"),
 ]
 
 def _conn():
@@ -97,11 +98,19 @@ def delete(hid):
     c.execute("DELETE FROM holdings WHERE id=?", (hid,))
     c.commit(); c.close()
 
-def update_price(ticker, price):
+def update_price(ticker, price, price_timestamp=None):
+    """Update current price for a ticker. price_timestamp: when the price was retrieved (e.g. YYYY-MM-DD HH:MM)."""
+    ts = price_timestamp or datetime.now().strftime("%Y-%m-%d %H:%M")
     c = _conn()
-    c.execute("UPDATE holdings SET current_price=?, updated_at=CURRENT_TIMESTAMP WHERE ticker=?", (price, ticker))
-    c.execute("INSERT INTO price_history (ticker, price) VALUES (?, ?)", (ticker, price))
+    c.execute("UPDATE holdings SET current_price=?, updated_at=CURRENT_TIMESTAMP, price_timestamp=? WHERE ticker=?", (price, ts, ticker))
+    c.execute("INSERT INTO price_history (ticker, price, date) VALUES (?, ?, ?)", (ticker, price, ts))
     c.commit(); c.close()
+
+def price_with_timestamp(ticker, price, price_timestamp=None):
+    """Combined display: ticker | price | updated timestamp. E.g. AAPL | 185.21 | updated 2026-03-09 18:45"""
+    ts = price_timestamp or datetime.now().strftime("%Y-%m-%d %H:%M")
+    p = f"{price:,.2f}" if price is not None and price == price else "—"
+    return f"{ticker} | {p} | updated {ts}"
 
 def get_setting(key, default=None):
     c = _conn()

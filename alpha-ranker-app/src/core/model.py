@@ -93,7 +93,7 @@ def fetch_all_fundamentals(tickers, api_key, callback=None):
 # ══════════════════════════════════════════════════════════════
 # TCN / LSTM (optional PyTorch)
 # ══════════════════════════════════════════════════════════════
-def _make_tcn_regressor(n_features, kernel_size=3, channels=(32, 32), dropout=0.2, dilation_levels=4):
+def _make_tcn_regressor(n_features, kernel_size=3, channels=(32, 32), dropout=0.2, dilation_levels=4, device=None):
     """Sklearn-like TCN regressor using PyTorch. Input 2D (n_samples, n_features)."""
     import torch
     import torch.nn as nn
@@ -130,7 +130,7 @@ def _make_tcn_regressor(n_features, kernel_size=3, channels=(32, 32), dropout=0.
             return self.fc(h).squeeze(-1)
 
     class TCNRegressor:
-        def __init__(self, n_features, kernel_size=3, channels=(32, 32), dropout=0.2, dilation_levels=4, epochs=50, lr=1e-3):
+        def __init__(self, n_features, kernel_size=3, channels=(32, 32), dropout=0.2, dilation_levels=4, epochs=50, lr=1e-3, device=None):
             self.n_features = n_features
             self.kernel_size = kernel_size
             self.channels = channels
@@ -139,7 +139,10 @@ def _make_tcn_regressor(n_features, kernel_size=3, channels=(32, 32), dropout=0.
             self.epochs = epochs
             self.lr = lr
             self.net = None
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if device == "cpu":
+                self.device = torch.device("cpu")
+            else:
+                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         def fit(self, X, y):
             if hasattr(X, "values"):
@@ -172,10 +175,10 @@ def _make_tcn_regressor(n_features, kernel_size=3, channels=(32, 32), dropout=0.
                 out = self.net(Xt)
             return out.cpu().numpy()
 
-    return TCNRegressor(n_features, kernel_size, channels, dropout, dilation_levels)
+    return TCNRegressor(n_features, kernel_size, channels, dropout, dilation_levels, device=device)
 
 
-def _make_lstm_regressor(n_features, units=64, dropout=0.2, epochs=50, lr=1e-3):
+def _make_lstm_regressor(n_features, units=64, dropout=0.2, epochs=50, lr=1e-3, device=None):
     """Sklearn-like LSTM regressor using PyTorch. Input 2D (n_samples, n_features)."""
     import torch
     import torch.nn as nn
@@ -194,14 +197,17 @@ def _make_lstm_regressor(n_features, units=64, dropout=0.2, epochs=50, lr=1e-3):
             return self.fc(out).squeeze(-1)
 
     class LSTMRegressor:
-        def __init__(self, n_features, units=64, dropout=0.2, epochs=50, lr=1e-3):
+        def __init__(self, n_features, units=64, dropout=0.2, epochs=50, lr=1e-3, device=None):
             self.n_features = n_features
             self.units = units
             self.dropout = dropout
             self.epochs = epochs
             self.lr = lr
             self.net = None
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if device == "cpu":
+                self.device = torch.device("cpu")
+            else:
+                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         def fit(self, X, y):
             if hasattr(X, "values"):
@@ -234,7 +240,7 @@ def _make_lstm_regressor(n_features, units=64, dropout=0.2, epochs=50, lr=1e-3):
                 out = self.net(Xt)
             return out.cpu().numpy()
 
-    return LSTMRegressor(n_features, units, dropout, epochs, lr)
+    return LSTMRegressor(n_features, units, dropout, epochs, lr, device=device)
 
 
 def _get_models(config=None):
@@ -279,25 +285,26 @@ def _get_models(config=None):
         lstm_u = config.get("lstm_units", 64) if config else 64
         lstm_drop = config.get("lstm_dropout", 0.2) if config else 0.2
 
+        use_gpu = (config or {}).get("use_gpu", True)
+        dl_device = None if use_gpu else "cpu"
         class _LazyTCN:
-            def __init__(self): self._model = None; self._n_features = None
+            def __init__(self, dev): self._model = None; self._device = dev
             def fit(self, X, y):
                 nf = X.shape[1] if hasattr(X, "shape") else len(X.columns)
-                self._n_features = nf
-                self._model = _make_tcn_regressor(nf, tcn_k, tuple(tcn_ch), tcn_drop, tcn_dil)
+                self._model = _make_tcn_regressor(nf, tcn_k, tuple(tcn_ch), tcn_drop, tcn_dil, device=self._device)
                 self._model.fit(X, y)
                 return self
             def predict(self, X): return self._model.predict(X) if self._model else np.zeros(len(X))
         class _LazyLSTM:
-            def __init__(self): self._model = None
+            def __init__(self, dev): self._model = None; self._device = dev
             def fit(self, X, y):
                 nf = X.shape[1] if hasattr(X, "shape") else len(X.columns)
-                self._model = _make_lstm_regressor(nf, lstm_u, lstm_drop)
+                self._model = _make_lstm_regressor(nf, lstm_u, lstm_drop, device=self._device)
                 self._model.fit(X, y)
                 return self
             def predict(self, X): return self._model.predict(X) if self._model else np.zeros(len(X))
-        all_models["TCN"] = _LazyTCN()
-        all_models["LSTM"] = _LazyLSTM()
+        all_models["TCN"] = _LazyTCN(dl_device)
+        all_models["LSTM"] = _LazyLSTM(dl_device)
     if config:
         enabled = config.get("enabled_models") or list(all_models.keys())
         return {k: v for k, v in all_models.items() if k in enabled}
@@ -855,11 +862,11 @@ def run_full_pipeline(callback=None):
             config = {}
         fund_db = fetch_all_fundamentals(list(yf_fund.keys()),fmp_key,callback)
         if len(fund_db)<30:
-            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment)
+            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"))
         wf = walk_forward_train(prices,fund_db,macro,sector_map,list(fund_db.keys()),
                                start_year=2019,callback=callback,config=config)
         if wf[0] is None:
-            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment)
+            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"))
         final_models,medians,feat_cols,feat_imp,oos_metrics = wf
         # Execution mode: single → keep only selected model
         if config and config.get("execution_mode") == "single":
@@ -875,15 +882,18 @@ def run_full_pipeline(callback=None):
         _store_model_state(final_models, medians, feat_cols, prices, fund_db, sector_map, yf_fund)
     else:
         if callback: callback("Simple mode (no FMP key)")
-        return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment)
+        return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"))
+    data_freshness = alldata.get("data_freshness")
+    if data_freshness:
+        model_info["data_freshness"] = data_freshness
     _save_cache(results,feat_imp,model_info,macro)
     return results,feat_imp,model_info,macro
 
-def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None):
+def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,data_freshness=None):
     r = train_simple(prices,yf_fund,macro,callback,sentiment)
     if r[0] is None: return None,None,{"error":"Training failed"},macro
     ensemble,med,fc,results,feat_imp,oos = r
-    # Store model state for explanations
+    if data_freshness: oos["data_freshness"] = data_freshness
     _store_model_state(ensemble, med, fc, prices, {}, sector_map, yf_fund)
     _save_cache(results,feat_imp,oos,macro)
     return results,feat_imp,oos,macro
@@ -911,9 +921,12 @@ def get_model_state():
     return _LAST_MODEL_STATE
 
 def _save_cache(results,feat_imp,model_info,macro):
+    saved_at = datetime.now().isoformat()
+    if isinstance(model_info, dict):
+        model_info = {**model_info, "saved_at": saved_at}
     with open(MODEL_CACHE,"wb") as f:
         pickle.dump({"results":results,"feat_imp":feat_imp,"model_info":model_info,
-                     "macro":macro,"saved_at":datetime.now().isoformat()},f)
+                     "macro":macro,"saved_at":saved_at},f)
 
 def load_cached():
     if MODEL_CACHE.exists():
@@ -921,3 +934,12 @@ def load_cached():
             with open(MODEL_CACHE,"rb") as f: return pickle.load(f)
         except: pass
     return None
+
+
+def clear_model_cache():
+    """Invalidate cached model results so next Run Model uses current config. Call after Apply in Settings."""
+    if MODEL_CACHE.exists():
+        try:
+            MODEL_CACHE.unlink()
+        except Exception:
+            pass

@@ -49,13 +49,16 @@ def evaluate_sell_signals(
 ) -> List[SellAlert]:
     """
     Evaluate one holding and return a list of sell alerts (one per triggered condition).
+    No alerts are generated when strategy_type is DONT_SELL (hold; ignore target, stop, horizon, confidence, alpha).
 
     holding: dict with entry_price/avg_price, target_price, stop_loss,
-             holding_horizon_days, entry_date/added_at, confidence, alpha_score, units, etc.
+             holding_horizon_days, entry_date/added_at, confidence, alpha_score, units, strategy_type, etc.
     current_price: if None, use holding['current_price'] or holding['avg_price'].
     current_model_consensus: reliability_score or model_agreement_score from current model run;
                              sell when this is below model_consensus_negative_threshold (e.g. 0 = negative).
     """
+    if (holding.get("strategy_type") or "").upper() == "DONT_SELL":
+        return []
     alerts: List[SellAlert] = []
     entry = holding.get("entry_price") or holding.get("avg_price") or 0
     price = current_price if current_price is not None else (holding.get("current_price") or entry)
@@ -179,10 +182,13 @@ def get_all_sell_alerts(
 
     If model_results is provided, current_confidence and current_alpha_score
     are looked up by ticker.
+    Holdings with strategy_type DONT_SELL never generate sell alerts.
     """
     out: List[SellAlert] = []
     for h in holdings:
         if only_open and (h.get("status") or "OPEN") != "OPEN":
+            continue
+        if (h.get("strategy_type") or "").upper() == "DONT_SELL":
             continue
         conf = alpha = consensus = None
         if model_results is not None and not model_results.empty and "ticker" in model_results.columns:

@@ -59,6 +59,7 @@ class AlphaRanker(ctk.CTk):
         if c:
             self.model_results=c.get("results"); self.feat_imp=c.get("feat_imp")
             self.model_info=c.get("model_info"); self.macro=c.get("macro")
+            self.after(100,self._refresh_data_updated_label)
         self.after(1000,self._refresh_prices)
         self.after(5000,self._morning_briefing)  # Market briefing after prices load
         api_key=portfolio.get_setting("anthropic_key")
@@ -477,6 +478,8 @@ class AlphaRanker(ctk.CTk):
                       fg_color="#4f46e5",command=self._run_model).pack(side="left")
         self.rk_status=ctk.CTkLabel(top,text="Not trained",font=("",10),text_color="#71717a")
         self.rk_status.pack(side="left",padx=12)
+        self.rk_data_updated=ctk.CTkLabel(top,text="",font=("",9),text_color="#52525b")
+        self.rk_data_updated.pack(side="left",padx=8)
         ff=ctk.CTkFrame(top,fg_color="transparent"); ff.pack(side="right")
         self.hz_var=ctk.StringVar(value="12")
         for m in ["3","6","12","24"]:
@@ -494,6 +497,28 @@ class AlphaRanker(ctk.CTk):
         self.rk_tree.tag_configure("normal",foreground="#e4e4e7")
         self.rk_tree.tag_configure("cold",foreground="#71717a")
 
+    def _refresh_data_updated_label(self):
+        """Set Rankings tab label to last data update time from model_info or cache."""
+        try:
+            info = self.model_info or {}
+            fresh = info.get("data_freshness") or {}
+            if isinstance(fresh, dict):
+                p = fresh.get("prices") or {}
+                disp = p.get("display") if isinstance(p, dict) else None
+            else:
+                disp = None
+            if disp:
+                self.rk_data_updated.configure(text=f"Market data last updated: {disp}")
+            elif info.get("saved_at"):
+                from datetime import datetime
+                try: t = datetime.fromisoformat(str(info["saved_at"]).replace("Z","+00:00")).strftime("%Y-%m-%d %H:%M")
+                except: t = str(info["saved_at"])[:16]
+                self.rk_data_updated.configure(text=f"Data last updated: {t}")
+            else:
+                self.rk_data_updated.configure(text="")
+        except Exception:
+            if hasattr(self,"rk_data_updated"): self.rk_data_updated.configure(text="")
+
     def _run_model(self):
         self.rk_status.configure(text="Training ensemble...",text_color="#fbbf24")
         def _train():
@@ -506,6 +531,7 @@ class AlphaRanker(ctk.CTk):
                 if res is None: self.after(0,lambda:self.rk_status.configure(text="Failed",text_color="#f87171")); return
                 self.model_results=res; self.feat_imp=fi; self.model_info=info; self.macro=mac
                 self.model_state=model.get_model_state()
+                self._refresh_data_updated_label()
                 pmic=info.get("per_model_ic",{})
                 pm=" ".join(f"{n[:3]}:{v:.3f}" for n,v in pmic.items()) if pmic else str(info.get("n_stocks","?"))+" stocks"
                 self.after(0,lambda:self.rk_status.configure(text=f"IC:{info.get('spearman_rank_corr','?')} | {pm}",text_color="#34d399"))
@@ -618,6 +644,9 @@ class AlphaRanker(ctk.CTk):
         ctk.CTkLabel(sl_frame,text="Weighting:",font=("",11)).pack(side="left",padx=(15,4))
         self.bld_weight=ctk.CTkOptionMenu(sl_frame,width=110,values=["Equal Weight","Risk Parity","Alpha Weight"],font=("",10))
         self.bld_weight.set("Alpha Weight"); self.bld_weight.pack(side="left")
+        ctk.CTkLabel(sl_frame,text="Strategy override:",font=("",11)).pack(side="left",padx=(15,4))
+        self.bld_strategy_override=ctk.CTkOptionMenu(sl_frame,width=110,values=["Auto","LONG_TERM","MEDIUM_TERM","SHORT_TERM","DONT_SELL"],font=("",10))
+        self.bld_strategy_override.set("Auto"); self.bld_strategy_override.pack(side="left")
 
         # Row 2: Two-column header
         hdr=ctk.CTkFrame(tab,fg_color="transparent"); hdr.grid(row=2,column=0,sticky="ew",pady=(4,0))
@@ -699,7 +728,10 @@ class AlphaRanker(ctk.CTk):
             alpha=p.get("alpha_score")
             alpha_str=f"+{alpha*100:.1f}%" if alpha is not None else p.get("alpha_score","-")
             if isinstance(alpha_str,(int,float)): alpha_str=f"+{float(alpha_str)*100:.1f}%" if alpha_str is not None else "-"
+            strat_override=self.bld_strategy_override.get() if hasattr(self,"bld_strategy_override") else "Auto"
             strat=p.get("strategy_type") or ("LONG_TERM" if p.get("src")=="ETF" else "SHORT_TERM")
+            if strat_override and str(strat_override) != "Auto":
+                strat=str(strat_override)
             holding_days=p.get("expected_holding_period") or p.get("holding_horizon") or horizon_days
             proposals.append({
                 "src":p.get("src","?"),
@@ -1094,7 +1126,7 @@ class AlphaRanker(ctk.CTk):
             ens_var = tk.StringVar(value=mset.get("ensemble_method","ic_weighted_average"))
             ctk.CTkOptionMenu(scroll,values=_engine_cfg.ENSEMBLE_METHODS,variable=ens_var,width=180).grid(row=row,column=1,sticky="w",pady=3)
             self._engine_vars["ensemble_method"]=ens_var; row+=1
-            for k,l in [("winsorization","Winsorization"),("rank_normalization","Rank normalization"),("sector_neutralization","Sector neutralization")]:
+            for k,l in [("winsorization","Winsorization"),("rank_normalization","Rank normalization"),("sector_neutralization","Sector neutralization"),("use_gpu","Use GPU for TCN/LSTM (auto-detect)")]:
                 v = tk.BooleanVar(value=mset.get(k,True))
                 ctk.CTkCheckBox(scroll,text=l,variable=v,font=("",11)).grid(row=row,column=0,columnspan=2,sticky="w",padx=8,pady=2)
                 self._engine_vars[k]=v; row+=1
@@ -1146,8 +1178,25 @@ class AlphaRanker(ctk.CTk):
                 ctk.CTkLabel(scroll,text=hint,font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
             row+=1
 
-        ctk.CTkButton(scroll,text="Save All Settings",width=180,height=36,font=("",12,"bold"),
-                      fg_color="#047857",command=self._save_settings).grid(row=row,column=0,columnspan=2,pady=15,sticky="w",padx=8)
+        btn_row=ctk.CTkFrame(scroll,fg_color="transparent"); btn_row.grid(row=row,column=0,columnspan=3,sticky="w",pady=15,padx=8); row+=1
+        ctk.CTkButton(btn_row,text="Apply",width=120,height=36,font=("",12,"bold"),
+                      fg_color="#4f46e5",hover_color="#4338ca",command=self._apply_settings).pack(side="left",padx=(0,8))
+        ctk.CTkButton(btn_row,text="Save All Settings",width=180,height=36,font=("",12,"bold"),
+                      fg_color="#047857",command=self._save_settings).pack(side="left")
+
+    def _apply_settings(self):
+        """Save all settings, invalidate model cache, and refresh so new config applies on next Run/Build. No restart."""
+        self._save_settings()
+        model.clear_model_cache()
+        self.model_results=None
+        self.feat_imp=None
+        self.model_info=None
+        if hasattr(self,"rk_tree") and self.rk_tree.winfo_exists():
+            for c in self.rk_tree.get_children(): self.rk_tree.delete(c)
+        if hasattr(self,"bld_tree") and self.bld_tree.winfo_exists():
+            for c in self.bld_tree.get_children(): self.bld_tree.delete(c)
+        self._build_proposals=[]
+        messagebox.showinfo("Apply","Settings applied. Click \"Run Model\" (Rankings) to recalculate with new parameters, then \"Generate\" (Build) to refresh recommendations.")
 
     def _save_settings(self):
         for k,e in self._sett.items(): portfolio.set_setting(k,e.get())
@@ -1177,6 +1226,7 @@ class AlphaRanker(ctk.CTk):
                     "winsorization": _ev("winsorization", True),
                     "rank_normalization": _ev("rank_normalization", True),
                     "sector_neutralization": _ev("sector_neutralization", True),
+                    "use_gpu": _ev("use_gpu", True),
                     "lookback_days": _ew("lookback_days", 252),
                     "training_window_years": _ew("training_window_years", 3),
                     "retraining_frequency_months": _ew("retraining_frequency_months", 3),
@@ -1206,7 +1256,7 @@ class AlphaRanker(ctk.CTk):
             except Exception:
                 pass
         self._update_engine()
-        messagebox.showinfo("OK","Settings saved!")
+        messagebox.showinfo("OK","Settings saved. Use \"Apply\" to invalidate cache and apply to next run.")
 
     # ── OLLAMA SETUP ──────────────────────────────────────────
     def _ollama_setup_dialog(self):

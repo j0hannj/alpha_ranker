@@ -64,6 +64,7 @@ DEFAULT_MODEL_SETTINGS = {
     "winsorize_quantile": 0.02,
     "rank_normalization": True,
     "sector_neutralization": True,
+    "use_gpu": True,  # When False, force CPU for TCN/LSTM/Transformer
 }
 
 DEFAULT_FEATURE_SETTINGS = {
@@ -77,8 +78,8 @@ DEFAULT_FEATURE_SETTINGS = {
     "size": True,
 }
 
-# Strategy types and default horizons (days)
-STRATEGY_TYPES = ["SHORT_TERM", "MEDIUM_TERM", "LONG_TERM"]
+# Strategy types and default horizons (days). DONT_SELL = no sell alerts (hold through horizon/stop).
+STRATEGY_TYPES = ["SHORT_TERM", "MEDIUM_TERM", "LONG_TERM", "DONT_SELL"]
 # Default horizon ranges: SHORT_TERM 30-90, MEDIUM_TERM 90-365, LONG_TERM 365+
 DEFAULT_HORIZON_SHORT_TERM_MIN = 30
 DEFAULT_HORIZON_SHORT_TERM_MAX = 90
