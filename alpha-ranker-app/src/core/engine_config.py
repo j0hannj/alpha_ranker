@@ -77,6 +77,15 @@ DEFAULT_FEATURE_SETTINGS = {
     "size": True,
 }
 
+# Strategy types and default horizons (days)
+STRATEGY_TYPES = ["SHORT_TERM", "MEDIUM_TERM", "LONG_TERM"]
+# Default horizon ranges: SHORT_TERM 30-90, MEDIUM_TERM 90-365, LONG_TERM 365+
+DEFAULT_HORIZON_SHORT_TERM_MIN = 30
+DEFAULT_HORIZON_SHORT_TERM_MAX = 90
+DEFAULT_HORIZON_MEDIUM_TERM_MIN = 90
+DEFAULT_HORIZON_MEDIUM_TERM_MAX = 365
+DEFAULT_HORIZON_LONG_TERM_MIN = 365
+
 DEFAULT_PORTFOLIO_SETTINGS = {
     "confidence_threshold": "MEDIUM",
     "max_positions": 10,
@@ -84,6 +93,12 @@ DEFAULT_PORTFOLIO_SETTINGS = {
     "min_return_vs_cost_multiple": 3.0,
     "holding_horizon_days": 365,
     "default_stop_loss_pct": 10.0,
+    # Per-strategy default horizons (days)
+    "horizon_short_term_days": 60,
+    "horizon_medium_term_days": 180,
+    "horizon_long_term_days": 365,
+    "max_holding_duration_days": 730,
+    "review_frequency_days": 30,
 }
 
 DEFAULT_TRANSACTION_COST_SETTINGS = {
@@ -153,6 +168,29 @@ def get_enabled_feature_columns() -> list:
         if feat.get(group, True):
             out.extend(cols)
     return list(dict.fromkeys(out))
+
+
+def get_strategy_horizon_days(strategy_type: str) -> int:
+    """Return default holding horizon in days for a strategy type."""
+    ps = get_portfolio_settings()
+    m = {
+        "SHORT_TERM": ps.get("horizon_short_term_days", 60),
+        "MEDIUM_TERM": ps.get("horizon_medium_term_days", 180),
+        "LONG_TERM": ps.get("horizon_long_term_days", 365),
+    }
+    return m.get(strategy_type, ps.get("holding_horizon_days", 365))
+
+
+def strategy_type_from_horizon(holding_days: int) -> str:
+    """Map holding horizon (days) to strategy type using configured boundaries."""
+    ps = get_portfolio_settings()
+    short = ps.get("horizon_short_term_days", 60)
+    med = ps.get("horizon_medium_term_days", 180)
+    if holding_days <= short:
+        return "SHORT_TERM"
+    if holding_days <= med:
+        return "MEDIUM_TERM"
+    return "LONG_TERM"
 
 
 def init_default_config():

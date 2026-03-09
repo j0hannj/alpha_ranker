@@ -8,12 +8,14 @@ Pipeline:
   4. Convert allocation to integer number of shares using real asset price.
   5. Ensure total cost never exceeds budget.
 
-Output format: list of dicts with ticker, price, units, invested_amount,
-confidence, alpha_score (and optional name, sector, reason for UI).
+Output includes investment horizon and exit strategy per recommendation:
+  ticker, current_price, units_to_buy, investment_amount, confidence, expected_return,
+  expected_holding_period, strategy_type, target_price, stop_loss, review_date, model_consensus_score.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 import pandas as pd
@@ -26,6 +28,12 @@ from .transaction_cost_model import (
     is_trade_economically_viable,
     expected_return_as_fraction,
 )
+
+try:
+    from core.engine_config import get_portfolio_settings, strategy_type_from_horizon
+except Exception:
+    get_portfolio_settings = None
+    strategy_type_from_horizon = lambda d: "MEDIUM_TERM" if d <= 180 else "LONG_TERM"
 
 
 def build_suggested_portfolio(
@@ -44,11 +52,15 @@ def build_suggested_portfolio(
     """
     Build a suggested portfolio from alpha model results.
     Rejects buys where expected_return < min_return_vs_cost_multiple * transaction_cost.
-    Output includes expected_return, transaction_cost, target_price, stop_loss, holding_horizon.
+    Each recommendation includes: ticker, current_price, units_to_buy, investment_amount,
+    confidence, expected_return, expected_holding_period, strategy_type, target_price,
+    stop_loss, review_date, model_consensus_score.
     """
     stock_budget = budget - etf_budget
     tx_params = transaction_cost_params or TransactionCostParams()
-    horizon = holding_horizon_days or 365
+    ps = get_portfolio_settings() if get_portfolio_settings else {}
+    horizon = holding_horizon_days or ps.get("holding_horizon_days", 365)
+    review_frequency_days = ps.get("review_frequency_days", 30)
     if stock_budget < 0:
         stock_budget = 0
 

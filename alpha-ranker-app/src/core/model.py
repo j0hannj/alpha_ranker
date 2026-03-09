@@ -91,10 +91,154 @@ def fetch_all_fundamentals(tickers, api_key, callback=None):
     return data
 
 # ══════════════════════════════════════════════════════════════
-# ENSEMBLE ENGINE (config-driven: enabled models, ensemble method)
+# TCN / LSTM (optional PyTorch)
 # ══════════════════════════════════════════════════════════════
+def _make_tcn_regressor(n_features, kernel_size=3, channels=(32, 32), dropout=0.2, dilation_levels=4):
+    """Sklearn-like TCN regressor using PyTorch. Input 2D (n_samples, n_features)."""
+    import torch
+    import torch.nn as nn
+
+    class _TCNBlock(nn.Module):
+        def __init__(self, c_in, c_out, k, dilation):
+            super().__init__()
+            pad = (k - 1) * dilation
+            self.conv = nn.Conv1d(c_in, c_out, k, padding=pad, dilation=dilation)
+            self.act = nn.ReLU()
+            self.drop = nn.Dropout(dropout)
+
+        def forward(self, x):
+            out = self.conv(x)
+            if out.size(-1) != x.size(-1):
+                out = out[..., :x.size(-1)]
+            return self.drop(self.act(out))
+
+    class _TCN(nn.Module):
+        def __init__(self):
+            super().__init__()
+            layers = []
+            ch = [1] + list(channels)
+            for i in range(len(ch) - 1):
+                for d in range(dilation_levels):
+                    layers.append(_TCNBlock(ch[i] if d == 0 else ch[i + 1], ch[i + 1], kernel_size, 2 ** d))
+            self.seq = nn.Sequential(*layers)
+            self.fc = nn.Linear(channels[-1] * n_features, 1)
+
+        def forward(self, x):
+            # x: (batch, 1, n_features)
+            h = self.seq(x)  # (batch, channels[-1], n_features)
+            h = h.reshape(h.size(0), -1)
+            return self.fc(h).squeeze(-1)
+
+    class TCNRegressor:
+        def __init__(self, n_features, kernel_size=3, channels=(32, 32), dropout=0.2, dilation_levels=4, epochs=50, lr=1e-3):
+            self.n_features = n_features
+            self.kernel_size = kernel_size
+            self.channels = channels
+            self.dropout = dropout
+            self.dilation_levels = dilation_levels
+            self.epochs = epochs
+            self.lr = lr
+            self.net = None
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        def fit(self, X, y):
+            if hasattr(X, "values"):
+                X = X.values
+            X = np.asarray(X, dtype=np.float32)
+            y = np.asarray(y, dtype=np.float32)
+            n_features = X.shape[1]
+            self.net = _TCN().to(self.device)
+            opt = torch.optim.Adam(self.net.parameters(), lr=self.lr)
+            Xt = torch.from_numpy(X).reshape(-1, 1, n_features).to(self.device)
+            yt = torch.from_numpy(y).to(self.device)
+            self.net.train()
+            for _ in range(self.epochs):
+                opt.zero_grad()
+                out = self.net(Xt)
+                loss = ((out - yt) ** 2).mean()
+                loss.backward()
+                opt.step()
+            return self
+
+        def predict(self, X):
+            if self.net is None:
+                return np.zeros(len(X))
+            if hasattr(X, "values"):
+                X = X.values
+            X = np.asarray(X, dtype=np.float32)
+            Xt = torch.from_numpy(X).reshape(-1, 1, X.shape[1]).to(self.device)
+            self.net.eval()
+            with torch.no_grad():
+                out = self.net(Xt)
+            return out.cpu().numpy()
+
+    return TCNRegressor(n_features, kernel_size, channels, dropout, dilation_levels)
+
+
+def _make_lstm_regressor(n_features, units=64, dropout=0.2, epochs=50, lr=1e-3):
+    """Sklearn-like LSTM regressor using PyTorch. Input 2D (n_samples, n_features)."""
+    import torch
+    import torch.nn as nn
+
+    class _LSTM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lstm = nn.LSTM(n_features, units, batch_first=True, dropout=dropout if dropout and dropout > 0 else 0)
+            self.drop = nn.Dropout(dropout or 0)
+            self.fc = nn.Linear(units, 1)
+
+        def forward(self, x):
+            # x: (batch, 1, n_features)
+            out, _ = self.lstm(x)
+            out = self.drop(out[:, -1, :])
+            return self.fc(out).squeeze(-1)
+
+    class LSTMRegressor:
+        def __init__(self, n_features, units=64, dropout=0.2, epochs=50, lr=1e-3):
+            self.n_features = n_features
+            self.units = units
+            self.dropout = dropout
+            self.epochs = epochs
+            self.lr = lr
+            self.net = None
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        def fit(self, X, y):
+            if hasattr(X, "values"):
+                X = X.values
+            X = np.asarray(X, dtype=np.float32)
+            y = np.asarray(y, dtype=np.float32)
+            n_features = X.shape[1]
+            self.net = _LSTM().to(self.device)
+            opt = torch.optim.Adam(self.net.parameters(), lr=self.lr)
+            Xt = torch.from_numpy(X).reshape(-1, 1, n_features).to(self.device)
+            yt = torch.from_numpy(y).to(self.device)
+            self.net.train()
+            for _ in range(self.epochs):
+                opt.zero_grad()
+                out = self.net(Xt)
+                loss = ((out - yt) ** 2).mean()
+                loss.backward()
+                opt.step()
+            return self
+
+        def predict(self, X):
+            if self.net is None:
+                return np.zeros(len(X))
+            if hasattr(X, "values"):
+                X = X.values
+            X = np.asarray(X, dtype=np.float32)
+            Xt = torch.from_numpy(X).reshape(-1, 1, X.shape[1]).to(self.device)
+            self.net.eval()
+            with torch.no_grad():
+                out = self.net(Xt)
+            return out.cpu().numpy()
+
+    return LSTMRegressor(n_features, units, dropout, epochs, lr)
+
+
 def _get_models(config=None):
-    """Build model dict. If config provided, only enabled_models are included."""
+    """Build model dict. If config provided, only enabled_models are included. TCN/LSTM added only if torch available."""
     from lightgbm import LGBMRegressor
     from xgboost import XGBRegressor
     from sklearn.linear_model import Ridge, ElasticNet
@@ -119,6 +263,41 @@ def _get_models(config=None):
         "RandomForest": RandomForestRegressor(n_estimators=min(300,n_est),max_depth=min(8,depth),
             min_samples_leaf=15,max_features=0.6,random_state=42,n_jobs=-1),
     }
+    # TCN / LSTM: require PyTorch and n_features (set at first fit in walk_forward)
+    _torch_available = False
+    try:
+        import torch
+        _torch_available = True
+    except Exception:
+        pass
+    if _torch_available:
+        # Placeholder instances; real n_features set when fitting. We use lazy wrappers that build net on first fit.
+        tcn_k = config.get("tcn_kernel_size", 3) if config else 3
+        tcn_ch = config.get("tcn_channels", [32, 32]) if config else [32, 32]
+        tcn_drop = config.get("tcn_dropout", 0.2) if config else 0.2
+        tcn_dil = config.get("tcn_dilation_levels", 4) if config else 4
+        lstm_u = config.get("lstm_units", 64) if config else 64
+        lstm_drop = config.get("lstm_dropout", 0.2) if config else 0.2
+
+        class _LazyTCN:
+            def __init__(self): self._model = None; self._n_features = None
+            def fit(self, X, y):
+                nf = X.shape[1] if hasattr(X, "shape") else len(X.columns)
+                self._n_features = nf
+                self._model = _make_tcn_regressor(nf, tcn_k, tuple(tcn_ch), tcn_drop, tcn_dil)
+                self._model.fit(X, y)
+                return self
+            def predict(self, X): return self._model.predict(X) if self._model else np.zeros(len(X))
+        class _LazyLSTM:
+            def __init__(self): self._model = None
+            def fit(self, X, y):
+                nf = X.shape[1] if hasattr(X, "shape") else len(X.columns)
+                self._model = _make_lstm_regressor(nf, lstm_u, lstm_drop)
+                self._model.fit(X, y)
+                return self
+            def predict(self, X): return self._model.predict(X) if self._model else np.zeros(len(X))
+        all_models["TCN"] = _LazyTCN()
+        all_models["LSTM"] = _LazyLSTM()
     if config:
         enabled = config.get("enabled_models") or list(all_models.keys())
         return {k: v for k, v in all_models.items() if k in enabled}
