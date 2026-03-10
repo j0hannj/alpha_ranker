@@ -1786,12 +1786,14 @@ def run_full_pipeline(callback=None):
         results["discovered_at"] = results["ticker"].map(
             lambda t: alldata["fundamentals"].get(t, {}).get("discovered_at")
         )
-    # Persist ranking snapshot for stability (before cache so next run can compare)
+    # Persist ranking snapshot and model run for stability tracking
     try:
         from core import portfolio
-        portfolio.save_ranking_snapshot(results)
+        run_id = datetime.now().isoformat()
+        portfolio.save_ranking_snapshot(results, run_id=run_id)
+        portfolio.save_model_run(model_info, run_id=run_id)
     except Exception as e:
-        logger.warning("run_full_pipeline: save_ranking_snapshot failed: %s", e)
+        logger.warning("run_full_pipeline: save_ranking_snapshot/save_model_run failed: %s", e)
     _save_cache(results,feat_imp,model_info,macro,all_horizons=all_horizon_results)
     return results,feat_imp,model_info,macro,all_horizon_results
 
@@ -1811,9 +1813,11 @@ def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,dat
     _store_model_state(ensemble, med, fc, prices, {}, sector_map, yf_fund)
     try:
         from core import portfolio
-        portfolio.save_ranking_snapshot(results)
+        run_id = datetime.now().isoformat()
+        portfolio.save_ranking_snapshot(results, run_id=run_id)
+        portfolio.save_model_run(oos, run_id=run_id)
     except Exception as e:
-        logger.warning("_run_simple: save_ranking_snapshot failed: %s", e)
+        logger.warning("_run_simple: save_ranking_snapshot/save_model_run failed: %s", e)
     _save_cache(results,feat_imp,oos,macro)
     return results,feat_imp,oos,macro,None
 
