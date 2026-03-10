@@ -988,20 +988,16 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     df["rank"] = df["alpha_rank"]  # backward compat
 
     # Expected return estimate: scale alpha score by historical long-short spread (not raw model output).
+    # Use a minimum spread so weak models still produce interpretable expected returns in the UI.
+    minimum_alpha_spread = 0.05  # conservative 5% long-short spread typical in equity factor models
+    if alpha_spread is None:
+        alpha_spread = minimum_alpha_spread
+    alpha_spread = max(float(alpha_spread), minimum_alpha_spread)
     pred_arr = np.asarray(preds)
     z_score = (pred_arr - np.mean(pred_arr)) / (np.std(pred_arr) + 1e-9)
-    if alpha_spread is not None and float(alpha_spread) > 0:
-        # ±2 z-score ≈ ±alpha_spread (decimal); convert to pct
-        expected_ret_pct = 100.0 * z_score * (float(alpha_spread) / 2.0)
-        df["expected_return_estimate_pct"] = np.round(expected_ret_pct, 2)
-        df["predicted_return_pct"] = df["expected_return_estimate_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    else:
-        df["expected_return_estimate_pct"] = np.nan
-        df["predicted_return_pct"] = 0.0  # do not show raw score as return
-        logger.debug(
-            "predict_current: alpha_spread=%s (None or <=0) -> predicted_return_pct=0 (no scaling)",
-            alpha_spread,
-        )
+    expected_ret_pct = 100.0 * z_score * (alpha_spread / 2.0)
+    df["expected_return_estimate_pct"] = np.round(expected_ret_pct, 2)
+    df["predicted_return_pct"] = df["expected_return_estimate_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     # Confidence = z-score of raw alpha (relative conviction)
     med, std = np.median(preds), np.std(preds)
@@ -1823,10 +1819,7 @@ def run_full_pipeline(callback=None):
                     final_models = {single_id: final_models[single_id]}
             alpha_spread = oos_metrics.get("mean_ls_return")
             if alpha_spread is None or float(alpha_spread) <= 0:
-                logger.warning(
-                    "predict_current: alpha_spread=%s (from oos mean_ls_return) -> predicted_return_pct will be 0 (need mean_ls_return > 0 from OOS long-short)",
-                    alpha_spread,
-                )
+                logger.debug("predict_current: mean_ls_return=%s -> will use minimum_alpha_spread (0.05) for expected return scaling", alpha_spread)
             else:
                 logger.info("predict_current: alpha_spread=%.4f (from oos mean_ls_return) -> scaling alpha score to expected return pct", float(alpha_spread))
             results_h, blend = predict_current(

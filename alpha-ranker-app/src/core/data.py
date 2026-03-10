@@ -1342,35 +1342,56 @@ def fetch_macro(callback=None):
         from fredapi import Fred
         fred = Fred(api_key=api_key)
         end = datetime.now()
-        start = end - timedelta(days=365)
-        macro = {"date": end.strftime("%Y-%m-%d")}
-        for name, sid in {
+        start = end - timedelta(days=365 * 10)  # 10 years of history for backtests / features
+        series_map = {
             "fed_funds_rate": "FEDFUNDS",
             "us_10y_yield": "DGS10",
             "us_2y_yield": "DGS2",
             "vix": "VIXCLS",
             "oil_price": "DCOILWTICO",
             "credit_spread": "BAA10Y",
-        }.items():
+        }
+        dfs = []
+        for name, sid in series_map.items():
             try:
                 s = fred.get_series(sid, start, end)
-                if len(s) > 0:
-                    macro[name] = round(float(s.dropna().iloc[-1]), 2)
+                if s is not None and len(s) > 0:
+                    s = s.dropna()
+                    if len(s) > 0:
+                        dfs.append(pd.DataFrame({name: s}))
             except Exception as e:
                 logger.debug("fetch_macro: FRED series %s failed: %s", sid, e)
+        if not dfs:
+            raise ValueError("fetch_macro: no FRED series returned")
+        hist = pd.concat(dfs, axis=1).sort_index()
+        hist = hist.ffill().bfill()
+        if "us_10y_yield" in hist.columns and "us_2y_yield" in hist.columns:
+            hist["yield_curve_slope"] = (hist["us_10y_yield"] - hist["us_2y_yield"]).round(2)
+        rows = []
+        for idx, row in hist.iterrows():
+            date_str = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+            macro_row = {"date": date_str, "source": "FRED"}
+            for col in ["fed_funds_rate", "us_10y_yield", "us_2y_yield", "yield_curve_slope", "oil_price", "vix", "credit_spread"]:
+                if col in hist.columns and pd.notna(row.get(col)):
+                    macro_row[col] = round(float(row[col]), 2)
+            rows.append(_macro_row_to_db(macro_row, source="FRED"))
+        try:
+            from . import portfolio as _pf
+            _pf.upsert_macro(rows)
+            if callback:
+                callback("Macro: %d history points stored" % len(rows))
+        except Exception as e:
+            logger.warning("fetch_macro: upsert_macro failed: %s", e)
+        macro = {"date": hist.index[-1].strftime("%Y-%m-%d") if hasattr(hist.index[-1], "strftime") else str(hist.index[-1])[:10]}
+        for name in series_map:
+            if name in hist.columns and pd.notna(hist[name].iloc[-1]):
+                macro[name] = round(float(hist[name].iloc[-1]), 2)
         if "us_10y_yield" in macro and "us_2y_yield" in macro:
-            macro["yield_curve_slope"] = round(
-                macro["us_10y_yield"] - macro["us_2y_yield"], 2
-            )
+            macro["yield_curve_slope"] = round(macro["us_10y_yield"] - macro["us_2y_yield"], 2)
         try:
             set("fred", "macro", macro)
         except Exception as e:
             logger.debug("fetch_macro: api_cache set failed: %s", e)
-        try:
-            from . import portfolio as _pf
-            _pf.upsert_macro([_macro_row_to_db(macro, source="FRED")])
-        except Exception as e:
-            logger.warning("fetch_macro: upsert_macro failed: %s", e)
         return macro
     except Exception as e:
         logger.warning("fetch_macro: FRED fetch failed: %s", e)
@@ -1410,7 +1431,7 @@ def _last_resort_region():
 
 def fetch_macro_by_region(callback=None):
     """
-    Fetch macro indicators par région depuis FRED. Si pas de FRED ou échec, on prend
+    Fetch macro indicators par région depuis FRED (historique complet). Si pas de FRED ou échec, on prend
     les derniers disponibles en DB (load_macro_by_region_latest). Aucun chiffre en dur
     sauf dernier recours si DB vide.
     Returns: (macro_us, macro_by_region).
@@ -1418,13 +1439,10 @@ def fetch_macro_by_region(callback=None):
     from . import portfolio as _pf
     date_str = datetime.now().strftime("%Y-%m-%d")
     end = datetime.now()
-    start = end - timedelta(days=365)
+    start = end - timedelta(days=365 * 10)  # 10 years of history
 
-    # Derniers dispo en DB (pour compléter si FRED absent ou échoue)
     from_db = _pf.load_macro_by_region_latest()
-
-    # Global (VIX, pétrole)
-    global_vals = {}
+    global_series = {}
     api_key = os.environ.get("FRED_API_KEY")
     if api_key:
         try:
@@ -1433,15 +1451,22 @@ def fetch_macro_by_region(callback=None):
             for name, sid in GLOBAL_MACRO_SERIES.items():
                 try:
                     s = fred.get_series(sid, start, end)
-                    if len(s) > 0:
-                        global_vals[name] = round(float(s.dropna().iloc[-1]), 2)
+                    if s is not None and len(s) > 0:
+                        s = s.dropna()
+                        if len(s) > 0:
+                            global_series[name] = s
                 except Exception as e:
                     logger.debug("fetch_macro_by_region: global %s failed: %s", sid, e)
         except Exception as e:
             logger.warning("fetch_macro_by_region: FRED init failed: %s", e)
-    if "vix" not in global_vals and from_db.get("US"):
+
+    global_vals = {}
+    for name in GLOBAL_MACRO_SERIES:
+        if global_series.get(name) is not None and len(global_series[name]) > 0:
+            global_vals[name] = round(float(global_series[name].iloc[-1]), 2)
+    if "vix" not in global_vals and from_db and from_db.get("US"):
         global_vals["vix"] = from_db["US"].get("vix")
-    if "oil_price" not in global_vals and from_db.get("US"):
+    if "oil_price" not in global_vals and from_db and from_db.get("US"):
         global_vals["oil_price"] = from_db["US"].get("oil_price")
     if "vix" not in global_vals:
         global_vals["vix"] = _last_resort_region().get("vix")
@@ -1456,11 +1481,11 @@ def fetch_macro_by_region(callback=None):
     db_rows = []
 
     for region in regions_to_fetch:
-        # Partir des derniers dispo en DB pour cette région (pas de valeurs en dur)
         out = dict(from_db.get(region, {})) if from_db else {}
         out.setdefault("oil_price", global_vals.get("oil_price"))
         out.setdefault("vix", global_vals.get("vix"))
 
+        region_dfs = []
         if api_key:
             try:
                 from fredapi import Fred
@@ -1468,39 +1493,82 @@ def fetch_macro_by_region(callback=None):
                 for key, sid in MACRO_SERIES_BY_REGION.get(region, {}).items():
                     try:
                         s = fred.get_series(sid, start, end)
-                        if len(s) > 0:
-                            out[key] = round(float(s.dropna().iloc[-1]), 2)
+                        if s is not None and len(s) > 0:
+                            s = s.dropna()
+                            if len(s) > 0:
+                                region_dfs.append(pd.DataFrame({key: s}))
                     except Exception as e:
                         logger.debug("fetch_macro_by_region: %s %s failed: %s", region, sid, e)
             except Exception:
                 pass
 
-        if out.get("yield_10y") is not None and out.get("yield_2y") is not None:
-            out["yield_curve_slope"] = round(out["yield_10y"] - out["yield_2y"], 2)
-        elif "yield_curve_slope" not in out or out.get("yield_curve_slope") is None:
-            out["yield_curve_slope"] = _last_resort_region().get("yield_curve_slope")
-        # Si aucune donnée du tout pour cette région, dernier recours
-        if not any(out.get(k) is not None for k in ("policy_rate", "yield_10y", "yield_2y")):
-            out = {**out, **_last_resort_region()}
-            out["oil_price"] = global_vals.get("oil_price", out["oil_price"])
-            out["vix"] = global_vals.get("vix", out["vix"])
+        if region_dfs:
+            hist = pd.concat(region_dfs, axis=1).sort_index()
+            hist = hist.ffill().bfill()
+            if "yield_10y" in hist.columns and "yield_2y" in hist.columns:
+                hist["yield_curve_slope"] = (hist["yield_10y"] - hist["yield_2y"]).round(2)
+            oil_s = global_series.get("oil_price")
+            vix_s = global_series.get("vix")
+            if oil_s is not None:
+                hist["oil_price"] = oil_s.reindex(hist.index).ffill().bfill()
+            if vix_s is not None:
+                hist["vix"] = vix_s.reindex(hist.index).ffill().bfill()
+            for idx, row in hist.iterrows():
+                date_str_i = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+                r_out = {
+                    "date": date_str_i,
+                    "region": region,
+                    "policy_rate": round(float(row["policy_rate"]), 2) if "policy_rate" in hist.columns and pd.notna(row.get("policy_rate")) else None,
+                    "yield_10y": round(float(row["yield_10y"]), 2) if "yield_10y" in hist.columns and pd.notna(row.get("yield_10y")) else None,
+                    "yield_2y": round(float(row["yield_2y"]), 2) if "yield_2y" in hist.columns and pd.notna(row.get("yield_2y")) else None,
+                    "yield_curve_slope": round(float(row["yield_curve_slope"]), 2) if "yield_curve_slope" in hist.columns and pd.notna(row.get("yield_curve_slope")) else None,
+                    "oil_price": round(float(row["oil_price"]), 2) if "oil_price" in hist.columns and pd.notna(row.get("oil_price")) else None,
+                    "vix": round(float(row["vix"]), 2) if "vix" in hist.columns and pd.notna(row.get("vix")) else None,
+                    "credit_spread": round(float(row["credit_spread"]), 2) if "credit_spread" in hist.columns and pd.notna(row.get("credit_spread")) else None,
+                    "source": "FRED",
+                }
+                db_rows.append(r_out)
+            last_row = hist.iloc[-1]
+            out = {
+                "policy_rate": round(float(last_row["policy_rate"]), 2) if "policy_rate" in hist.columns and pd.notna(last_row.get("policy_rate")) else out.get("policy_rate"),
+                "yield_10y": round(float(last_row["yield_10y"]), 2) if "yield_10y" in hist.columns and pd.notna(last_row.get("yield_10y")) else out.get("yield_10y"),
+                "yield_2y": round(float(last_row["yield_2y"]), 2) if "yield_2y" in hist.columns and pd.notna(last_row.get("yield_2y")) else out.get("yield_2y"),
+                "oil_price": global_vals.get("oil_price"),
+                "vix": global_vals.get("vix"),
+                "credit_spread": round(float(last_row["credit_spread"]), 2) if "credit_spread" in hist.columns and pd.notna(last_row.get("credit_spread")) else out.get("credit_spread"),
+            }
+            if out.get("yield_10y") is not None and out.get("yield_2y") is not None:
+                out["yield_curve_slope"] = round(out["yield_10y"] - out["yield_2y"], 2)
+            else:
+                out["yield_curve_slope"] = out.get("yield_curve_slope") or _last_resort_region().get("yield_curve_slope")
+        else:
+            if out.get("yield_10y") is not None and out.get("yield_2y") is not None:
+                out["yield_curve_slope"] = round(out["yield_10y"] - out["yield_2y"], 2)
+            elif "yield_curve_slope" not in out or out.get("yield_curve_slope") is None:
+                out["yield_curve_slope"] = _last_resort_region().get("yield_curve_slope")
+            if not any(out.get(k) is not None for k in ("policy_rate", "yield_10y", "yield_2y")):
+                out = {**out, **_last_resort_region()}
+                out["oil_price"] = global_vals.get("oil_price", out["oil_price"])
+                out["vix"] = global_vals.get("vix", out["vix"])
+            db_rows.append({
+                "date": date_str,
+                "region": region,
+                "policy_rate": out.get("policy_rate"),
+                "yield_10y": out.get("yield_10y"),
+                "yield_2y": out.get("yield_2y"),
+                "yield_curve_slope": out.get("yield_curve_slope"),
+                "oil_price": out.get("oil_price"),
+                "vix": out.get("vix"),
+                "credit_spread": out.get("credit_spread"),
+                "source": "db_reuse",
+            })
 
         macro_by_region[region] = out
-        db_rows.append({
-            "date": date_str,
-            "region": region,
-            "policy_rate": out.get("policy_rate"),
-            "yield_10y": out.get("yield_10y"),
-            "yield_2y": out.get("yield_2y"),
-            "yield_curve_slope": out.get("yield_curve_slope"),
-            "oil_price": out.get("oil_price"),
-            "vix": out.get("vix"),
-            "credit_spread": out.get("credit_spread"),
-            "source": "FRED" if api_key else "db_reuse",
-        })
 
     try:
         _pf.upsert_macro_by_region(db_rows)
+        if callback and db_rows:
+            callback("Macro: %d history points by region stored" % len(db_rows))
     except Exception as e:
         logger.warning("fetch_macro_by_region: upsert_macro_by_region failed: %s", e)
 
