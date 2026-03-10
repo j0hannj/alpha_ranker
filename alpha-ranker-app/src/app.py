@@ -789,10 +789,7 @@ class AlphaRanker(ctk.CTk):
         prev = portfolio.get_latest_snapshot_before()
         history_by_ticker = {} if db_path else {t: portfolio.get_ranking_history(t, 20) for t in df50["ticker"].tolist()}
         display_df = add_ranking_insights(df50, prev, history_by_ticker, db_path=db_path, n_runs=10)
-        try:
-            portfolio.save_ranking_snapshot(self.model_results)
-        except Exception:
-            pass
+        # Snapshot is saved in model.run_full_pipeline / _run_simple after results, before cache
         self._rankings_display_df=display_df
         try:
             last_run=portfolio.get_current_run_timestamp()
@@ -819,7 +816,8 @@ class AlphaRanker(ctk.CTk):
         self.rk_tree.delete(*self.rk_tree.get_children())
         imap=get_isin_map()
         for _,r in display_df.iterrows():
-            raw_ret=r["predicted_return_pct"]; ret=round(raw_ret,1) if _ok(raw_ret) else None; conf=r.get("confidence",0)
+            raw_ret=r["predicted_return_pct"]; ret=round(float(raw_ret),1) if _ok(raw_ret) else None; conf=r.get("confidence",0)
+            if isinstance(conf,float) and conf!=conf: conf=0.0
             conv=_conv(conf)
             pe=f"{r['pe_forward']:.1f}" if _ok(r.get("pe_forward")) else "-"
             gr=f"{r['revenue_growth']*100:.0f}%" if _ok(r.get("revenue_growth")) else "-"
@@ -836,9 +834,11 @@ class AlphaRanker(ctk.CTk):
             rd_delta=r.get("rank_delta"); rd_val=None
             if rd_delta is not None and (not isinstance(rd_delta,float) or rd_delta==rd_delta): rd_val=int(rd_delta)
             ch_disp=f"+{rd_val}" if rd_val is not None and rd_val>0 else str(rd_val) if rd_val is not None and rd_val!=0 else "—"
-            stab=r.get("movement_classification") or "—"
+            stab=r.get("movement_classification")
+            if stab is None or (isinstance(stab,float) and stab!=stab): stab="—"
+            else: stab=str(stab)[:14]
             self.rk_tree.insert("","end",values=(int(r["rank"]),get_display_id(r["ticker"],imap),r["ticker"],r.get("name","")[:18],
-                r.get("sector","")[:14],ch_disp,stab[:14],rd,conv,an,sn,pe,gr,fcf,mom),tags=(tag,))
+                r.get("sector","")[:14],ch_disp,stab,rd,conv,an,sn,pe,gr,fcf,mom),tags=(tag,))
 
     def _rk_tooltip_text(self, row_series, col_name):
         """Full value for tooltip by column. row_series is one row of _rankings_display_df."""

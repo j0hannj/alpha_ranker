@@ -651,6 +651,7 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     df["alpha_score"] = df["alpha_score"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     # predicted_return_pct must use raw score (return space); alpha_score is z-score for ranking only
     df["predicted_return_pct"] = (df["alpha_score_raw"] * 100).round(2)
+    df["predicted_return_pct"] = df["predicted_return_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     df = df.sort_values("alpha_score", ascending=False).reset_index(drop=True)
     df["alpha_rank"] = range(1, len(df) + 1)
     df["rank"] = df["alpha_rank"]  # backward compat
@@ -1028,11 +1029,18 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
     )
     df["alpha_score"] = df["alpha_score"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     df["predicted_return_pct"] = (df["alpha_score_raw"] * 100).round(2)
+    df["predicted_return_pct"] = df["predicted_return_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df["model_agreement_score"] = 1.0
     df=df.sort_values("alpha_score",ascending=False).reset_index(drop=True)
     df["alpha_rank"]=range(1,len(df)+1); df["rank"]=df["alpha_rank"]
     med,std=np.median(preds),np.std(preds)
     df["confidence"]=((preds-med)/std).round(2) if std>0 else 0
     df["confidence"] = df["confidence"].fillna(0.0)
+    ar, cr = df["alpha_score"], df["confidence"]
+    a_norm = (ar - ar.min()) / (ar.max() - ar.min() + 1e-9)
+    c_norm = (cr - cr.min()) / (cr.max() - cr.min() + 1e-9)
+    df["reliability_score"] = (0.4 * a_norm + 0.3 * c_norm + 0.3 * df["model_agreement_score"]).round(3)
+    df["reliability_score"] = df["reliability_score"].fillna(0.0)
     assert df["predicted_return_pct"].isna().sum() == 0, f"NaN in predicted_return_pct: {df['predicted_return_pct'].isna().sum()}"
     pm = {n:{"cv_r2":info.get("cv_r2",0)} for n,info in ensemble.items()}
     oos_metrics = {"mode":"simple_ensemble","n_stocks":len(X),"n_features":len(fcols),
@@ -1242,6 +1250,12 @@ def run_full_pipeline(callback=None):
     data_freshness = alldata.get("data_freshness")
     if data_freshness:
         model_info["data_freshness"] = data_freshness
+    # Persist ranking snapshot for stability (before cache so next run can compare)
+    try:
+        from core import portfolio
+        portfolio.save_ranking_snapshot(results)
+    except Exception:
+        pass
     _save_cache(results,feat_imp,model_info,macro,all_horizons=all_horizon_results)
     return results,feat_imp,model_info,macro,all_horizon_results
 
@@ -1253,6 +1267,11 @@ def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,dat
     oos["simple_reason"] = simple_reason
     if data_freshness: oos["data_freshness"] = data_freshness
     _store_model_state(ensemble, med, fc, prices, {}, sector_map, yf_fund)
+    try:
+        from core import portfolio
+        portfolio.save_ranking_snapshot(results)
+    except Exception:
+        pass
     _save_cache(results,feat_imp,oos,macro)
     return results,feat_imp,oos,macro,None
 

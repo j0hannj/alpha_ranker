@@ -290,7 +290,11 @@ def save_ranking_snapshot(results_df, run_id=None):
             ticker = row.get("ticker")
             if not ticker:
                 continue
-            rank_pos = int(row.get(rank_col, 0)) if rank_col in row.index else 0
+            rp = row.get(rank_col) if rank_col in results_df.columns else None
+            try:
+                rank_pos = int(rp) if rp is not None and (rp == rp if isinstance(rp, float) else True) else 0
+            except (TypeError, ValueError):
+                rank_pos = 0
             alpha = row.get("alpha_score")
             alpha = float(alpha) if alpha is not None and alpha == alpha else None
             conf = row.get("confidence")
