@@ -1,5 +1,5 @@
 """Alpha Ranker — Desktop Application (Clean Rewrite)
-Tabs: Portfolio | Rankings | Build | Projections | Backtest | Settings
+Tabs: Portfolio | Rankings | Build | Projections | Backtest | Universe | Settings
 Shared AI chat panel on the right side.
 """
 import sys, os, threading, json
@@ -710,7 +710,8 @@ class AlphaRanker(ctk.CTk):
                 res,fi,info,mac,all_hr=model.run_full_pipeline(callback=cb)
                 self.after(0,lambda: self._on_train_done(res, fi, info, mac, all_hr))
             except Exception as e:
-                self.after(0,lambda:self._on_train_error(str(e)[:60]))
+                err = str(e)[:60]
+                self.after(0, lambda err=err: self._on_train_error(err))
         threading.Thread(target=_train,daemon=True).start()
 
     def _on_train_progress(self, msg, progress=None):
@@ -1397,6 +1398,104 @@ class AlphaRanker(ctk.CTk):
             fig.tight_layout(pad=0.8)
             cv=FigureCanvasTkAgg(fig,master=self.bt_chart); cv.draw(); cv.get_tk_widget().pack(fill="both",expand=True)
         except: pass
+
+    # ── UNIVERSE TAB (tickers connus + historique au clic) ──────
+    def _init_universe(self):
+        tab=self.tabs.tab("Universe"); tab.grid_columnconfigure(0,weight=0); tab.grid_columnconfigure(1,weight=1)
+        tab.grid_rowconfigure(1,weight=1)
+        top=ctk.CTkFrame(tab,fg_color="transparent"); top.grid(row=0,column=0,columnspan=2,sticky="ew",pady=(0,6))
+        top.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(top,text="Universe — Tickers connus",font=("",14,"bold")).pack(side="left")
+        ctk.CTkButton(top,text="Actualiser la liste",width=120,height=28,font=("",10),fg_color="#27272a",
+                      command=self._universe_refresh).pack(side="right",padx=4)
+        self._universe_count_lbl=ctk.CTkLabel(top,text="",font=("",10),text_color="#71717a"); self._universe_count_lbl.pack(side="right")
+        # Left: list of tickers (Treeview)
+        left=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8,width=220); left.grid(row=1,column=0,sticky="nsew",padx=(0,4),pady=0)
+        left.grid_propagate(False)
+        left.grid_rowconfigure(1,weight=1); left.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(left,text="Ticker",font=("",10,"bold"),text_color="#a1a1aa").grid(row=0,column=0,sticky="ew",padx=6,pady=4)
+        self._universe_tree=None
+        self._universe_tree, self._universe_sb = self._universe_build_list(left)
+        self._universe_tree.grid(row=1,column=0,sticky="nsew",padx=4,pady=(0,4))
+        if self._universe_sb: self._universe_sb.grid(row=1,column=1,sticky="ns",pady=(0,4))
+        # Right: chart area
+        self._universe_chart=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8); self._universe_chart.grid(row=1,column=1,sticky="nsew",padx=4,pady=0)
+        self._universe_chart.grid_columnconfigure(0,weight=1); self._universe_chart.grid_rowconfigure(0,weight=1)
+        ctk.CTkLabel(self._universe_chart,text="Cliquez sur un ticker pour afficher l'historique des prix",
+                     text_color="#52525b",font=("",11)).pack(pady=40)
+        self._universe_fill_tickers()
+
+    def _universe_build_list(self,parent):
+        t=ttk.Treeview(parent,columns=("ticker",),show="headings",height=24,selectmode="browse",style="T.Treeview")
+        t.heading("ticker",text="Symbole"); t.column("ticker",width=180,minwidth=100)
+        t.bind("<<TreeviewSelect>>",self._universe_on_select)
+        sb=ttk.Scrollbar(parent,orient="vertical",command=t.yview)
+        t.configure(yscrollcommand=sb.set)
+        return t, sb
+
+    def _universe_fill_tickers(self):
+        try:
+            from core.api_cache import get_cached_ticker_list, get_cache_status
+            tickers=get_cached_ticker_list()
+            st=get_cache_status()
+            n=st.get("n_tickers") or len(tickers)
+            self._universe_count_lbl.configure(text=f"{len(tickers)} tickers" if tickers else "Aucun (lancer un fetch data)")
+        except Exception:
+            tickers=[]; self._universe_count_lbl.configure(text="")
+        for c in self._universe_tree.get_children(""): self._universe_tree.delete(c)
+        for t in sorted(tickers):
+            self._universe_tree.insert("","end",values=(t,))
+
+    def _universe_refresh(self):
+        self._universe_fill_tickers()
+
+    def _universe_on_select(self,ev):
+        sel=self._universe_tree.selection()
+        if not sel: return
+        item=self._universe_tree.item(sel[0]); v=item.get("values")
+        ticker=v[0] if v else None
+        if not ticker: return
+        for w in self._universe_chart.winfo_children(): w.destroy()
+        ctk.CTkLabel(self._universe_chart,text=f"Chargement de {ticker}…",text_color="#71717a",font=("",11)).pack(pady=30)
+        def _load():
+            try:
+                import yfinance as yf
+                from datetime import datetime, timedelta
+                end=datetime.now(); start=end-timedelta(days=365*5)
+                hist=yf.Ticker(ticker).history(start=start,end=end,auto_adjust=True)
+                if hist is None or hist.empty:
+                    self.after(0,lambda:self._universe_show_placeholder(ticker,"Pas de données"))
+                    return
+                self.after(0,lambda: self._universe_plot(ticker, hist))
+            except Exception as e:
+                self.after(0,lambda:self._universe_show_placeholder(ticker,str(e)))
+        threading.Thread(target=_load,daemon=True).start()
+
+    def _universe_show_placeholder(self,ticker,msg):
+        for w in self._universe_chart.winfo_children(): w.destroy()
+        ctk.CTkLabel(self._universe_chart,text=f"{ticker}: {msg}",text_color="#f87171",font=("",11)).pack(pady=30)
+
+    def _universe_plot(self,ticker,hist):
+        for w in self._universe_chart.winfo_children(): w.destroy()
+        try:
+            import matplotlib; matplotlib.use("Agg")
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            import numpy as np
+            fig=Figure(figsize=(10,4),dpi=100,facecolor="#09090b")
+            ax=fig.add_subplot(111); ax.set_facecolor("#09090b")
+            close=hist["Close"] if "Close" in hist.columns else hist.iloc[:,0]
+            ax.plot(close.index,close.values,color="#818cf8",linewidth=1.5)
+            ax.fill_between(close.index,close.values,alpha=0.15,color="#818cf8")
+            ax.set_title(f"{ticker} — Historique (5 ans)",fontsize=12,color="#e4e4e7")
+            ax.tick_params(colors="#71717a",labelsize=9)
+            for s in ["top","right"]: ax.spines[s].set_visible(False)
+            for s in ["bottom","left"]: ax.spines[s].set_color("#27272a")
+            ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x,p: f"{x:.0f}" if x>=1 else f"{x:.2f}"))
+            fig.tight_layout(pad=1)
+            cv=FigureCanvasTkAgg(fig,master=self._universe_chart); cv.draw(); cv.get_tk_widget().pack(fill="both",expand=True)
+        except Exception as e:
+            ctk.CTkLabel(self._universe_chart,text=f"Erreur: {e}",text_color="#f87171",font=("",11)).pack(pady=30)
 
     # ── SETTINGS TAB ──────────────────────────────────────────
     def _init_settings(self):
