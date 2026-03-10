@@ -1148,14 +1148,11 @@ def explain_ranking_context(ticker, models_dict, medians, feat_cols, prices,
 # ══════════════════════════════════════════════════════════════
 # PORTFOLIO PROJECTIONS
 # ══════════════════════════════════════════════════════════════
-# Pipeline: model prediction (H-month return) → return projection → price projection → UI.
-# Model output: predicted_return_pct = 100 * alpha_score, where alpha_score is the model's
-# predicted SIMPLE return over the training horizon (H months). So predicted_return_pct=12
-# means 12% return over H months, NOT annualized. We never interpret a 1-year prediction
-# as a 2-year return; we compound explicitly: projected_price = current_price * (1+r)^(m/H).
-# When all_horizon_results is provided, each display horizon uses that horizon's prediction
-# when available (no extrapolation); otherwise we compound from primary horizon.
-# No clamping of predicted returns: unrealistic predictions must be fixed at the model/target level.
+# Pipeline: expected return estimate (from alpha score × historical long-short) → return projection → price projection → UI.
+# predicted_return_pct is the expected_return_estimate_pct: scaled from alpha score using mean_ls_return (not raw model output).
+# So predicted_return_pct=12 means ~12% expected return over H months (estimate), NOT annualized.
+# We compound explicitly: projected_price = current_price * (1+r)^(m/H).
+# When all_horizon_results is provided, each display horizon uses that horizon's prediction when available.
 def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_info=None, all_horizon_results=None):
     """Project future prices per holding from model predictions.
     Uses model's prediction horizon (H months) so a 12-month prediction is never used as 24-month.
