@@ -822,7 +822,7 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
     Formula: projected_price = current_price * (1 + r_H)^(m/H), with r_H = model return over H months.
     """
     if horizons is None:
-        horizons = [3, 6, 12, 24]
+        horizons = [3, 6, 12, 24, 120]
     H = 12
     if isinstance(model_info, dict) and model_info.get("prediction_horizon_months") is not None:
         H = int(model_info["prediction_horizon_months"])
@@ -885,12 +885,13 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
                     factor = 0.0
             factor = float(factor)
             projected_price = cp * factor
-            proj["horizons"][f"{m}M"] = {
+            label = "10Y" if m == 120 else f"{m}M"
+            proj["horizons"][label] = {
                 "price": round(projected_price, 2),
                 "value": round(projected_price * h.get("units", 0), 2),
                 "gain_pct": round((factor - 1) * 100, 1),
             }
-            proj["projection_trace"]["per_horizon"][f"{m}M"] = {
+            proj["projection_trace"]["per_horizon"][label] = {
                 "formula": f"(1 + {r_H:.4f})^({m}/{H}) = {factor:.4f}",
                 "factor": round(factor, 4),
                 "projected_price": round(projected_price, 2),
@@ -1062,9 +1063,20 @@ def assess_model_health(oos_metrics):
 # ══════════════════════════════════════════════════════════════
 def run_full_pipeline(callback=None):
     """Main entry. Fetches all data, trains ensemble, generates alpha rankings.
-    Returns (results_df, feature_importance, model_info, macro). Uses as_of_date=last price date when deterministic_mode for reproducibility."""
+    Returns (results_df, feature_importance, model_info, macro). Uses as_of_date=last price date when deterministic_mode for reproducibility.
+    Data years are sized to the max horizon (e.g. 10Y horizon → 10 years of history)."""
     from .data import fetch_all_data
-    alldata = fetch_all_data(callback=callback)
+    try:
+        from core.engine_config import get_model_settings, init_default_config
+        init_default_config()
+        config = get_model_settings() or {}
+    except Exception:
+        config = {}
+    horizons_cfg = config.get("horizons", [3, 6, 12, 24, 120])
+    training_window_years = int(config.get("training_window_years", 3))
+    data_years = max(training_window_years, max(horizons_cfg) // 12 if horizons_cfg else 5)
+    if callback: callback(f"Loading {data_years} years of data for horizons {horizons_cfg}...")
+    alldata = fetch_all_data(years=data_years, callback=callback)
     tickers = alldata["tickers"]; prices = alldata["prices"]
     yf_fund = alldata["fundamentals"]; macro = alldata["macro"]
     sentiment = alldata.get("sentiment",{})
@@ -1094,14 +1106,17 @@ def run_full_pipeline(callback=None):
         fund_db = fetch_all_fundamentals(list(yf_fund.keys()),fmp_key,callback)
         if len(fund_db)<30:
             return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness")) + (None,)
-        horizons = (config or {}).get("horizons", [3, 6, 12, 24])
+        horizons = (config or {}).get("horizons", [3, 6, 12, 24, 120])
         primary_H = (config or {}).get("primary_horizon", 12)
+        ref_year = as_of_date.year if as_of_date else datetime.now().year
         all_horizon_results = {}
         for H in horizons:
             if callback: callback(f"═══ Training {H}M horizon ═══")
             config_h = {**(config or {}), "prediction_horizon_months": H}
+            # Calibration window matches horizon: 10Y horizon → 10 years of data
+            start_year_H = ref_year - max(H // 12, 1)
             wf = walk_forward_train(prices,fund_db,macro,sector_map,list(fund_db.keys()),
-                                   start_year=2019,horizon_months=H,callback=callback,config=config_h,as_of_date=as_of_date)
+                                   start_year=start_year_H,horizon_months=H,callback=callback,config=config_h,as_of_date=as_of_date)
             if wf[0] is None:
                 if callback: callback(f"  {H}M: insufficient data, skipping")
                 continue

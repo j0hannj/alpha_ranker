@@ -640,8 +640,8 @@ class AlphaRanker(ctk.CTk):
         self.rk_data_updated.pack(side="left",padx=12)
         ff=ctk.CTkFrame(top,fg_color="transparent"); ff.pack(side="right")
         self.hz_var=ctk.StringVar(value="12")
-        for m in ["3","6","12","24"]:
-            ctk.CTkRadioButton(ff,text=f"{m}M",variable=self.hz_var,value=m,font=("",10),
+        for m, lbl in [("3","3M"),("6","6M"),("12","12M"),("24","24M"),("120","10Y")]:
+            ctk.CTkRadioButton(ff,text=lbl,variable=self.hz_var,value=m,font=("",10),
                               command=self._upd_rankings).pack(side="left",padx=2)
         cols=("rank","ticker","name","sector","change","stability","return","conviction","analyst","sentiment","pe","growth","fcf","mom")
         self.rk_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
@@ -724,18 +724,22 @@ class AlphaRanker(ctk.CTk):
         else:
             df50=self.model_results.head(50).copy()
             if all_hr and not all_hr.get(hz):
-                self.rk_status.configure(text=f"Horizon {hz}M: run model to generate", text_color="#a1a1aa")
-        _dp=getattr(portfolio,"DB_PATH",None)
-        try:
-            db_path=str(_dp.resolve()) if _dp else ""
-        except Exception:
-            db_path=str(_dp) if _dp else ""
-        prev=portfolio.get_latest_snapshot_before()
-        history_by_ticker={} if db_path else {t:portfolio.get_ranking_history(t,20) for t in df50["ticker"].tolist()}
-        display_df=add_ranking_insights(df50,prev,history_by_ticker,db_path=db_path if db_path else None)
+                hz_lbl = "10Y" if hz == 120 else f"{hz}M"
+                self.rk_status.configure(text=f"Horizon {hz_lbl}: run model to generate", text_color="#a1a1aa")
+        db_path = portfolio.get_ranking_db_path() if getattr(portfolio, "get_ranking_db_path", None) else None
+        if not db_path:
+            try:
+                _dp = getattr(portfolio, "DB_PATH", None)
+                db_path = str(_dp.resolve()) if _dp else None
+            except Exception:
+                db_path = None
+        prev = portfolio.get_latest_snapshot_before()
+        history_by_ticker = {} if db_path else {t: portfolio.get_ranking_history(t, 20) for t in df50["ticker"].tolist()}
+        display_df = add_ranking_insights(df50, prev, history_by_ticker, db_path=db_path, n_runs=10)
         try:
             portfolio.save_ranking_snapshot(self.model_results)
-        except Exception: pass
+        except Exception:
+            pass
         self._rankings_display_df=display_df
         try:
             last_run=portfolio.get_current_run_timestamp()
@@ -991,11 +995,22 @@ class AlphaRanker(ctk.CTk):
         broker_fee=float(portfolio.get_setting("tx_cost_broker_fee","0").replace(",",".") or "0")
         spread_bps=float(portfolio.get_setting("tx_cost_spread_bps","10").replace(",",".") or "10")
         slippage_bps=float(portfolio.get_setting("tx_cost_slippage_bps","5").replace(",",".") or "5")
-        horizon_days=portfolio.get_setting("default_holding_horizon_days")
-        horizon_days=int(horizon_days) if horizon_days else 365
+        # Use selected ranking horizon so proposals match 3M/6M/12M/24M/10Y (not always 365d)
+        hv = getattr(self, "hz_var", None)
+        hz = int(hv.get()) if hv else 12
+        horizon_months_to_days = {3: 90, 6: 180, 12: 365, 24: 730, 120: 3650}
+        horizon_days = horizon_months_to_days.get(hz)
+        if horizon_days is None:
+            hd = portfolio.get_setting("default_holding_horizon_days")
+            horizon_days = int(hd) if hd else 365
         tx_params=TransactionCostParams(broker_fee=broker_fee,spread_bps=spread_bps,slippage_bps=slippage_bps)
         etf_positions=None
-        raw=self.model_results.copy()
+        # Use model results for selected horizon when multi-horizon is available
+        all_hr = getattr(self,"all_horizon_results",None) or {}
+        if all_hr and hz in all_hr:
+            raw = all_hr[hz]["results"].copy()
+        else:
+            raw = self.model_results.copy()
         if "current_price" not in raw.columns:
             raw["current_price"]=None
         # If no prices available, fetch live so build can propose candidates
@@ -1217,10 +1232,10 @@ class AlphaRanker(ctk.CTk):
         top=ctk.CTkFrame(tab,fg_color="transparent"); top.grid(row=0,column=0,sticky="ew",pady=(0,6))
         ctk.CTkLabel(top,text="Forward Price Projections",font=("",14,"bold")).pack(side="left")
         ctk.CTkButton(top,text="Refresh",width=90,height=28,font=("",10),command=self._upd_proj).pack(side="right")
-        cols=("ticker","name","price","units","val","3m","6m","12m","24m","ret")
+        cols=("ticker","name","price","units","val","3m","6m","12m","24m","10y","ret")
         self.prj_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["Ticker","Name","Price","Qty","Value","3M","6M","12M","24M","Model ret"],
-                          [60,130,70,45,75,75,75,80,80,68]):
+        for c,h,w in zip(cols,["Ticker","Name","Price","Qty","Value","3M","6M","12M","24M","10Y","Model ret"],
+                          [60,120,65,42,70,68,68,72,72,72,68]):
             self.prj_tree.heading(c,text=h); self.prj_tree.column(c,width=w,anchor="e" if c not in ("ticker","name") else "w")
         self.prj_tree.grid(row=1,column=0,sticky="nsew")
         self.prj_tree.tag_configure("bull",foreground="#34d399"); self.prj_tree.tag_configure("bear",foreground="#f87171"); self.prj_tree.tag_configure("flat",foreground="#fbbf24")
@@ -1239,13 +1254,14 @@ class AlphaRanker(ctk.CTk):
         for p in projs:
             h3,h6=p["horizons"].get("3M",{}),p["horizons"].get("6M",{})
             h12,h24=p["horizons"].get("12M",{}),p["horizons"].get("24M",{})
+            h10y=p["horizons"].get("10Y",{})
             ar=p.get("annual_return",0); tag="bull" if ar>0.1 else "bear" if ar<0 else "flat"
             cu="\u20ac" if p["currency"]=="EUR" else "$" if p["currency"]=="USD" else "\u00a3"
             v=p["current_price"]*p["units"]; tn+=v; t12+=h12.get("value",v)
             self.prj_tree.insert("","end",values=(p["ticker"],p["name"][:20],f"{p['current_price']}{cu}",p["units"],f"{v:,.0f}{cu}",
                 f"{h3.get('price','?')}{cu} ({h3.get('gain_pct',0):+.1f}%)",f"{h6.get('price','?')}{cu} ({h6.get('gain_pct',0):+.1f}%)",
                 f"{h12.get('price','?')}{cu} ({h12.get('gain_pct',0):+.1f}%)",f"{h24.get('price','?')}{cu} ({h24.get('gain_pct',0):+.1f}%)",
-                f"{ar*100:+.1f}%"),tags=(tag,))
+                f"{h10y.get('price','?')}{cu} ({h10y.get('gain_pct',0):+.1f}%)",f"{ar*100:+.1f}%"),tags=(tag,))
         g=((t12/tn-1)*100) if tn>0 else 0
         self.prj_lbl.configure(text=f"12M: {t12:,.0f}EUR ({g:+.1f}%) | Now: {tn:,.0f}EUR | Model horizon: {H}M (projections compounded from {H}M return)")
 
@@ -1255,7 +1271,7 @@ class AlphaRanker(ctk.CTk):
         tab.grid_rowconfigure(2,weight=1); tab.grid_rowconfigure(3,weight=1)
         top=ctk.CTkFrame(tab,fg_color="transparent"); top.grid(row=0,column=0,sticky="ew",pady=(0,6))
         ctk.CTkLabel(top,text="Horizon:",font=("",11)).pack(side="left")
-        self.bt_hz=ctk.CTkOptionMenu(top,values=["3","6","12","24"],width=60); self.bt_hz.set("12"); self.bt_hz.pack(side="left",padx=4)
+        self.bt_hz=ctk.CTkOptionMenu(top,values=["3","6","12","24","120"],width=60); self.bt_hz.set("12"); self.bt_hz.pack(side="left",padx=4)
         ctk.CTkLabel(top,text="From:",font=("",11)).pack(side="left",padx=(10,4))
         self.bt_yr=ctk.CTkOptionMenu(top,values=["2019","2020","2021","2022"],width=70); self.bt_yr.set("2019"); self.bt_yr.pack(side="left")
         ctk.CTkButton(top,text="Run Backtest",width=130,height=30,font=("",11,"bold"),fg_color="#4f46e5",
@@ -1492,7 +1508,7 @@ class AlphaRanker(ctk.CTk):
             self._engine_vars["ensemble_method"]=ens_var; row+=1
             ctk.CTkLabel(scroll,text="Prediction horizon (months)",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
             hz_var = tk.StringVar(value=str(mset.get("prediction_horizon_months",12)))
-            ctk.CTkOptionMenu(scroll,values=["3","6","12","24"],variable=hz_var,width=80).grid(row=row,column=1,sticky="w",pady=3)
+            ctk.CTkOptionMenu(scroll,values=["3","6","12","24","120"],variable=hz_var,width=80).grid(row=row,column=1,sticky="w",pady=3)
             self._engine_vars["prediction_horizon_months"]=hz_var; row+=1
             for k,l in [("winsorization","Winsorization"),("rank_normalization","Rank normalization"),("sector_neutralization","Sector neutralization"),("feature_decorrelation","Feature decorrelation (PCA)"),("use_gpu","Use GPU for TCN/LSTM (auto-detect)")]:
                 v = tk.BooleanVar(value=mset.get(k,True if k!="feature_decorrelation" else False))

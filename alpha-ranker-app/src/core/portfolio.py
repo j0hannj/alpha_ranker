@@ -11,6 +11,12 @@ from datetime import datetime
 
 DB_PATH = Path(__file__).parent.parent.parent / "db" / "portfolio.db"
 
+
+def get_ranking_db_path():
+    """Return absolute path to the portfolio DB (for ranking_history). Use this when passing db_path to add_ranking_insights."""
+    return str(DB_PATH.resolve())
+
+
 # New columns for decision-engine tracking (added via migration)
 _HOLDINGS_EXTRA_COLUMNS = [
     ("strategy_type", "TEXT DEFAULT 'LONG_TERM'"),
@@ -276,6 +282,7 @@ def save_ranking_snapshot(results_df, run_id=None):
         return
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     run_id = run_id or datetime.now().isoformat()
+    c = None
     try:
         c = _conn()
         rank_col = "rank" if "rank" in results_df.columns else "alpha_rank"
@@ -283,7 +290,7 @@ def save_ranking_snapshot(results_df, run_id=None):
             ticker = row.get("ticker")
             if not ticker:
                 continue
-            rank_pos = int(row.get(rank_col, 0)) if rank_col in row.columns else 0
+            rank_pos = int(row.get(rank_col, 0)) if rank_col in row.index else 0
             alpha = row.get("alpha_score")
             alpha = float(alpha) if alpha is not None and alpha == alpha else None
             conf = row.get("confidence")
@@ -307,11 +314,16 @@ def save_ranking_snapshot(results_df, run_id=None):
                     (ticker, alpha, rank_pos, conf, ts, run_id),
                 )
         c.commit()
-        c.close()
         cleanup_old_history(keep_runs=20)
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("save_ranking_snapshot failed: %s", e)
+    finally:
+        if c is not None:
+            try:
+                c.close()
+            except Exception:
+                pass
 
 
 def cleanup_old_history(keep_runs=20):

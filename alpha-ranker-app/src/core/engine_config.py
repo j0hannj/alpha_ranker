@@ -46,7 +46,7 @@ DEFAULT_MODEL_SETTINGS = {
     "single_model_id": "LightGBM",
     "ensemble_method": "ic_weighted_average",
     "prediction_horizon_months": 12,
-    "horizons": [3, 6, 12, 24],
+    "horizons": [3, 6, 12, 24, 120],
     "primary_horizon": 12,
     "lookback_days": 252,
     "training_window_years": 3,
@@ -74,8 +74,9 @@ DEFAULT_MODEL_SETTINGS = {
     # Term structure: weights for combining alpha across horizons (when multi-horizon is used)
     "horizon_weight_3m": 0.1,
     "horizon_weight_6m": 0.2,
-    "horizon_weight_12m": 0.5,
+    "horizon_weight_12m": 0.45,
     "horizon_weight_24m": 0.2,
+    "horizon_weight_120m": 0.05,
     "deterministic_mode": True,
     "global_seed": 42,
 }
@@ -110,7 +111,7 @@ DEFAULT_PORTFOLIO_SETTINGS = {
     # Per-strategy default horizons (days)
     "horizon_short_term_days": 60,
     "horizon_medium_term_days": 180,
-    "horizon_long_term_days": 365,
+    "horizon_long_term_days": 3650,
     "max_holding_duration_days": 730,
     "review_frequency_days": 30,
     # Sell signal behavior per strategy: "disabled" | "passive" (stop-loss only) | "active" (all signals)
@@ -201,7 +202,7 @@ def get_strategy_horizon_days(strategy_type: str) -> int:
     m = {
         "SHORT_TERM": ps.get("horizon_short_term_days", 60),
         "MEDIUM_TERM": ps.get("horizon_medium_term_days", 180),
-        "LONG_TERM": ps.get("horizon_long_term_days", 365),
+        "LONG_TERM": ps.get("horizon_long_term_days", 3650),
     }
     return m.get(strategy_type, ps.get("holding_horizon_days", 365))
 

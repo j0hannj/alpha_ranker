@@ -484,29 +484,45 @@ def build_suggested_portfolio(
                 ticker = row.get("ticker")
                 if not ticker or any(o.get("ticker") == ticker and o.get("action") == "BUY" for o in out):
                     continue
+                alpha_val = float(row["alpha_score"]) if pd.notna(row.get("alpha_score")) else None
+                if alpha_val is None and pd.notna(row.get("predicted_return_pct")):
+                    alpha_val = float(row["predicted_return_pct"]) / 100.0
+                ret_frac = alpha_val if alpha_val is not None else 0.0
+                price = row.get("current_price")
+                if hasattr(price, "item"):
+                    price = None if pd.isna(price) else float(price)
+                elif price is not None and pd.isna(price):
+                    price = None
+                target_price = round(price * (1 + ret_frac), 2) if price is not None and price > 0 else None
+                stop_loss = round(price * (1 - default_stop_loss_pct / 100.0), 2) if price is not None and price > 0 else None
+                cons = None
+                if "reliability_score" in row.columns and pd.notna(row.get("reliability_score")):
+                    cons = round(float(row["reliability_score"]), 3)
+                elif "model_agreement_score" in row.columns and pd.notna(row.get("model_agreement_score")):
+                    cons = round(float(row["model_agreement_score"]), 3)
                 out.append({
                     "action": "BUY",
                     "src": "Model",
                     "ticker": ticker,
                     "name": (row.get("name") or ticker)[:22],
                     "sector": (row.get("sector") or "")[:14],
-                    "price": None,
-                    "current_price": row.get("current_price"),
+                    "price": price,
+                    "current_price": price,
                     "units": 0,
                     "units_to_buy": 0,
                     "invested_amount": 0,
                     "investment_amount": 0,
                     "confidence": row.get("confidence"),
-                    "alpha_score": float(row["alpha_score"]) if pd.notna(row.get("alpha_score")) else None,
-                    "expected_return": round(float(row["alpha_score"]) * 100, 2) if pd.notna(row.get("alpha_score")) else None,
-                    "target_price": None,
-                    "stop_loss": None,
+                    "alpha_score": alpha_val,
+                    "expected_return": round(ret_frac * 100, 2) if ret_frac else None,
+                    "target_price": target_price,
+                    "stop_loss": stop_loss,
                     "holding_horizon": horizon,
                     "expected_holding_period": horizon,
                     "strategy_type": strategy_type_from_horizon(horizon),
                     "review_date": (datetime.now() + timedelta(days=review_frequency_days)).strftime("%Y-%m-%d"),
-                    "model_consensus_score": round(float(row["reliability_score"]), 3) if "reliability_score" in row.columns and pd.notna(row.get("reliability_score")) else (round(float(row["model_agreement_score"]), 3) if "model_agreement_score" in row.columns and pd.notna(row.get("model_agreement_score")) else None),
-                    "reason": "Price needed - refresh data and re-run to get units",
+                    "model_consensus_score": cons,
+                    "reason": "Price needed - refresh data and re-run to get units" if not price else "Rank signal (fallback)",
                 })
 
     return out
