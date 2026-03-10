@@ -25,7 +25,7 @@ DOMAIN_FEATURE = "feature_settings"
 DOMAIN_RISK = "risk_settings"
 DOMAIN_UNIVERSE = "universe_settings"
 
-# Universe: FMP exchanges + yfinance fallback sources (toutes les listes ici, plus en dur dans data.py)
+# Universe: FMP exchanges + auto-scan for discovery (toutes les listes ici, plus en dur dans data.py)
 DEFAULT_UNIVERSE_SETTINGS = {
     "fmp_exchanges": [
         "NYSE,NASDAQ,AMEX",
@@ -34,7 +34,10 @@ DEFAULT_UNIVERSE_SETTINGS = {
         "LSE",
     ],
     "fmp_min_market_cap": 500_000_000,
-    "fmp_screener_limit": 2000,
+    "fmp_screener_limit": 3000,
+    "auto_scan": True,
+    "scan_frequency_hours": 24,
+    "max_universe_size": 5000,
     "yf_etf_tickers": ["SPY", "QQQ", "IWM", "VGK", "EFA", "EEM"],
     "yf_search_queries": [
         "large cap technology stocks",
