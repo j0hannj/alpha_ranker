@@ -108,8 +108,18 @@ def _conn():
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
     mr_info = {row[1] for row in c.execute("PRAGMA table_info(model_runs)").fetchall()}
-    if "mean_ls_return" not in mr_info:
-        c.execute("ALTER TABLE model_runs ADD COLUMN mean_ls_return REAL")
+    for col, spec in [
+        ("mean_ls_return", "REAL"),
+        ("ic_std", "REAL"),
+        ("n_predictions", "INTEGER"),
+        ("n_periods", "INTEGER"),
+        ("n_obs", "INTEGER"),
+        ("cross_section_mean", "REAL"),
+        ("cross_section_min", "INTEGER"),
+        ("cross_section_max", "INTEGER"),
+    ]:
+        if col not in mr_info:
+            c.execute(f"ALTER TABLE model_runs ADD COLUMN {col} {spec}")
     c.execute("""CREATE INDEX IF NOT EXISTS idx_model_runs_timestamp ON model_runs(run_timestamp DESC)""")
     c.execute("""CREATE INDEX IF NOT EXISTS idx_model_runs_run_id ON model_runs(run_id)""")
     c.execute("""CREATE TABLE IF NOT EXISTS trade_history (
@@ -195,6 +205,15 @@ def _conn():
         credit_spread     REAL,
         source            TEXT
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS cross_section_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        run_timestamp TEXT NOT NULL,
+        period_date TEXT NOT NULL,
+        cross_section_size INTEGER NOT NULL,
+        horizon_months INTEGER
+    )""")
+    c.execute("""CREATE INDEX IF NOT EXISTS idx_cross_section_run ON cross_section_log(run_id)""")
     c.execute("""CREATE TABLE IF NOT EXISTS macro_by_region (
         date              TEXT NOT NULL,
         region            TEXT NOT NULL,
@@ -774,13 +793,31 @@ def save_model_run(model_info, run_id=None):
     per_model_ic = json.dumps(per_model_ic) if per_model_ic is not None else None
     is_degraded = 1 if model_info.get("is_degraded") else 0
     fund_source = model_info.get("fund_source")
+    ic_std_val = model_info.get("ic_std")
+    ic_std_val = float(ic_std_val) if ic_std_val is not None and isinstance(ic_std_val, (int, float)) and (not isinstance(ic_std_val, float) or ic_std_val == ic_std_val) else None
+    n_predictions = model_info.get("n_predictions")
+    n_predictions = int(n_predictions) if n_predictions is not None else None
+    n_periods = model_info.get("n_periods")
+    n_periods = int(n_periods) if n_periods is not None else None
+    n_obs = model_info.get("n_obs")
+    n_obs = int(n_obs) if n_obs is not None else None
+    cs_mean = model_info.get("cross_section_mean")
+    cs_mean = float(cs_mean) if cs_mean is not None and isinstance(cs_mean, (int, float)) and (not isinstance(cs_mean, float) or cs_mean == cs_mean) else None
+    cs_min = model_info.get("cross_section_min")
+    cs_min = int(cs_min) if cs_min is not None else None
+    cs_max = model_info.get("cross_section_max")
+    cs_max = int(cs_max) if cs_max is not None else None
     c = None
     try:
         c = _conn()
         c.execute(
-            """INSERT INTO model_runs (run_id, run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, ic_ir, mean_ls_return, n_stocks, n_features, prediction_horizon_months, horizons_trained, per_model_ic, is_degraded, fund_source)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (run_id, run_ts, mode, mean_ic, spearman, hit_rate, ic_ir, mean_ls_return, n_stocks, n_features, horizon, horizons_trained, per_model_ic, is_degraded, fund_source),
+            """INSERT INTO model_runs (run_id, run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, ic_ir, mean_ls_return,
+               n_stocks, n_features, prediction_horizon_months, horizons_trained, per_model_ic, is_degraded, fund_source,
+               ic_std, n_predictions, n_periods, n_obs, cross_section_mean, cross_section_min, cross_section_max)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (run_id, run_ts, mode, mean_ic, spearman, hit_rate, ic_ir, mean_ls_return, n_stocks, n_features,
+             horizon, horizons_trained, per_model_ic, is_degraded, fund_source,
+             ic_std_val, n_predictions, n_periods, n_obs, cs_mean, cs_min, cs_max),
         )
         c.commit()
         # Keep only last 100 runs
@@ -797,10 +834,12 @@ def save_model_run(model_info, run_id=None):
 
 
 def get_model_run_history(limit=50):
-    """Return the last N model runs for stability analysis. Each row: run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, etc."""
+    """Return the last N model runs for stability analysis."""
     c = _conn()
     rows = c.execute(
-        """SELECT run_id, run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, ic_ir, mean_ls_return, n_stocks, n_features, prediction_horizon_months, horizons_trained, per_model_ic, is_degraded, fund_source
+        """SELECT run_id, run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, ic_ir, mean_ls_return,
+                  n_stocks, n_features, prediction_horizon_months, horizons_trained, per_model_ic, is_degraded, fund_source,
+                  ic_std, n_predictions, n_periods, n_obs, cross_section_mean, cross_section_min, cross_section_max
            FROM model_runs ORDER BY run_timestamp DESC LIMIT ?""",
         (limit,),
     ).fetchall()
@@ -820,6 +859,108 @@ def get_model_run_history(limit=50):
             pass
         out.append(d)
     return out
+
+
+# ══════════════════════════════════════════════════════════════
+# WALK-FORWARD RUN METRICS (unified helper)
+# ══════════════════════════════════════════════════════════════
+
+def save_model_run_metrics(oos_metrics, cross_section_sizes, horizon_months=None, run_id=None):
+    """Persist both run-level summary and per-period cross-section sizes from walk_forward_train().
+    oos_metrics: dict from walk_forward_train (mean_ic, ic_ir, hit_rate, etc.)
+    cross_section_sizes: list of dicts with period_date, cross_section_size, horizon_months."""
+    import numpy as np
+    run_id = run_id or datetime.now().isoformat()
+
+    # Compute cross-section summary stats
+    sizes = [r["cross_section_size"] for r in cross_section_sizes] if cross_section_sizes else []
+    cs_mean = float(np.mean(sizes)) if sizes else None
+    cs_min = int(np.min(sizes)) if sizes else None
+    cs_max = int(np.max(sizes)) if sizes else None
+
+    # Build run-level model_info dict for save_model_run
+    run_info = {
+        "mode": "walk_forward_ensemble",
+        "mean_ic": oos_metrics.get("mean_ic"),
+        "ic_std": oos_metrics.get("ic_std"),
+        "ic_ir": oos_metrics.get("ic_ir"),
+        "spearman_rank_corr": oos_metrics.get("spearman_rank_corr"),
+        "hit_rate": oos_metrics.get("hit_rate"),
+        "mean_ls_return": oos_metrics.get("mean_ls_return"),
+        "n_predictions": oos_metrics.get("n_predictions"),
+        "n_periods": oos_metrics.get("n_periods"),
+        "n_stocks": oos_metrics.get("n_stocks"),
+        "n_obs": oos_metrics.get("n_obs"),
+        "n_features": oos_metrics.get("n_features"),
+        "per_model_ic": oos_metrics.get("per_model_ic"),
+        "prediction_horizon_months": horizon_months,
+        "cross_section_mean": cs_mean,
+        "cross_section_min": cs_min,
+        "cross_section_max": cs_max,
+    }
+    save_model_run(run_info, run_id=run_id)
+
+    # Persist per-period cross-section sizes
+    if cross_section_sizes:
+        save_cross_section_log(cross_section_sizes, run_id=run_id)
+
+
+# ══════════════════════════════════════════════════════════════
+# CROSS-SECTION LOG (walk-forward universe size tracking)
+# ══════════════════════════════════════════════════════════════
+
+def save_cross_section_log(records, run_id=None):
+    """Persist cross-section sizes collected during walk-forward training.
+    records: list of dicts with keys period_date, cross_section_size, horizon_months."""
+    if not records:
+        return
+    run_id = run_id or datetime.now().isoformat()
+    run_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    c = None
+    try:
+        c = _conn()
+        c.executemany(
+            """INSERT INTO cross_section_log
+               (run_id, run_timestamp, period_date, cross_section_size, horizon_months)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (run_id, run_ts,
+                 r["period_date"].strftime("%Y-%m-%d") if hasattr(r["period_date"], "strftime") else str(r["period_date"]),
+                 int(r["cross_section_size"]),
+                 r.get("horizon_months"))
+                for r in records
+            ],
+        )
+        c.commit()
+        # Keep only last 200 runs worth of data
+        c.execute("""DELETE FROM cross_section_log WHERE run_id NOT IN
+                     (SELECT DISTINCT run_id FROM cross_section_log ORDER BY run_timestamp DESC LIMIT 200)""")
+        c.commit()
+    except Exception as e:
+        logger.warning("save_cross_section_log failed: %s", e)
+    finally:
+        if c is not None:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
+def get_cross_section_log(run_id=None, limit=500):
+    """Return cross-section log entries. If run_id given, filter to that run."""
+    c = _conn()
+    if run_id:
+        rows = c.execute(
+            "SELECT * FROM cross_section_log WHERE run_id = ? ORDER BY period_date",
+            (run_id,),
+        ).fetchall()
+    else:
+        rows = c.execute(
+            "SELECT * FROM cross_section_log ORDER BY run_timestamp DESC, period_date LIMIT ?",
+            (limit,),
+        ).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
 
 
 # ══════════════════════════════════════════════════════════════

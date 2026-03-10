@@ -712,8 +712,10 @@ class AlphaRanker(ctk.CTk):
         self.rk_history_frame.grid(row=4,column=0,sticky="ew",padx=10,pady=(4,0))
         self.rk_history_frame.grid_columnconfigure(0,weight=1)
         ctk.CTkLabel(self.rk_history_frame,text="Run history (IC, hit rate, long-short):",font=("",10,"bold"),text_color="#a1a1aa").grid(row=0,column=0,sticky="w")
-        self.rk_history_tree=ttk.Treeview(self.rk_history_frame,columns=("date","mode","stocks","feat","ic","ic_ir","hit","ls","horizon"),show="headings",height=6,style="T.Treeview")
-        for col,head,w in [("date","Date",100),("mode","Mode",72),("stocks","Stocks",48),("feat","Feat",40),("ic","IC",52),("ic_ir","IC IR",52),("hit","Hit%",48),("ls","L-S ret",58),("horizon","Hz",40)]:
+        self.rk_history_tree=ttk.Treeview(self.rk_history_frame,columns=("date","mode","stocks","feat","ic","ic_ir","hit","ls","horizon","cs_avg","cs_min","cs_max","preds","periods"),show="headings",height=6,style="T.Treeview")
+        for col,head,w in [("date","Date",100),("mode","Mode",62),("stocks","Stk",40),("feat","Ft",34),
+                           ("ic","IC",48),("ic_ir","ICIR",44),("hit","Hit%",42),("ls","L-S",48),("horizon","Hz",34),
+                           ("cs_avg","CS avg",48),("cs_min","CS min",46),("cs_max","CS max",46),("preds","Pred",42),("periods","Per",34)]:
             self.rk_history_tree.heading(col,text=head); self.rk_history_tree.column(col,width=w)
         self.rk_history_tree.grid(row=1,column=0,sticky="ew",pady=(2,0))
 
@@ -863,7 +865,12 @@ class AlphaRanker(ctk.CTk):
                     hr=r.get("hit_rate"); hr_s=f"{100*(hr or 0):.0f}%" if hr is not None and hr==hr else "—"
                     ls=r.get("mean_ls_return"); ls_s=f"{100*(ls or 0):.1f}%" if ls is not None and ls==ls else "—"
                     hz=r.get("prediction_horizon_months"); hz_s=f"{hz}M" if hz is not None else "—"
-                    self.rk_history_tree.insert("","end",values=(ts,mode,ns_s,nf_s,ic_s,icir_s,hr_s,ls_s,hz_s))
+                    cs_a=r.get("cross_section_mean"); cs_a_s=f"{cs_a:.0f}" if cs_a is not None and isinstance(cs_a,(int,float)) and cs_a==cs_a else "—"
+                    cs_mn=r.get("cross_section_min"); cs_mn_s=str(cs_mn) if cs_mn is not None else "—"
+                    cs_mx=r.get("cross_section_max"); cs_mx_s=str(cs_mx) if cs_mx is not None else "—"
+                    np_=r.get("n_predictions"); np_s=str(np_) if np_ is not None else "—"
+                    npe=r.get("n_periods"); npe_s=str(npe) if npe is not None else "—"
+                    self.rk_history_tree.insert("","end",values=(ts,mode,ns_s,nf_s,ic_s,icir_s,hr_s,ls_s,hz_s,cs_a_s,cs_mn_s,cs_mx_s,np_s,npe_s))
             except Exception as e:
                 logger.debug("_upd_rankings: model run history failed: %s", e)
         self.rk_tree.delete(*self.rk_tree.get_children())

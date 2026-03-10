@@ -730,6 +730,7 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
                    for m in [1,4,7,10] if datetime(y,m,1) < cutoff]
     if callback: callback(f"Walk-forward: {len(rebal_dates)} periods")
     all_periods = []; meta_cols = ["ticker","date","sector","name","forward_return"]
+    cross_section_sizes = []
     try:
         from .data import get_region_for_ticker as _get_region
     except Exception:
@@ -744,10 +745,11 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         df = add_sector_interactions(df,sector_map)
         df["forward_return"] = df["ticker"].apply(lambda t: compute_forward_return(prices,t,rd,H))
         df = df.dropna(subset=["forward_return"])
+        cross_section_sizes.append({"period_date": rd, "cross_section_size": len(df), "horizon_months": H})
         if len(df)<20: continue
         df["period_idx"]=i; all_periods.append(df)
     if not all_periods:
-        if callback: callback("Not enough data"); return None,None,None,None,None,None,None,None,None
+        if callback: callback("Not enough data"); return None,None,None,None,None,None,None,None,None,cross_section_sizes
     full_df = pd.concat(all_periods,ignore_index=True)
     all_num_cols = [c for c in full_df.columns if c not in meta_cols+["period_idx"]
                     and full_df[c].dtype in [np.float64,np.int64,float,int]]
@@ -913,8 +915,21 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         except Exception as e:
             logger.warning("walk_forward final fit: %s failed: %s", name, e)
     feat_imp = _get_feature_importance(final_models,feat_cols)
+
+    # Persist run metrics + per-period cross-section sizes into DB
+    try:
+        from core import portfolio as _pf_run
+        _pf_run.save_model_run_metrics(
+            {**oos_metrics, "n_features": len(feat_cols)},
+            cross_section_sizes,
+            horizon_months=H,
+        )
+    except Exception as e:
+        logger.debug("walk_forward_train: save_model_run_metrics failed: %s", e)
+
     return (final_models, med_final, feat_cols, feat_imp, oos_metrics,
-            fitted_decorrelation, fitted_winsorizer, fitted_rank, fitted_sector_neutralizer)
+            fitted_decorrelation, fitted_winsorizer, fitted_rank, fitted_sector_neutralizer,
+            cross_section_sizes)
 
 # ══════════════════════════════════════════════════════════════
 # CURRENT PREDICTIONS → ALPHA SCORE + RANK
@@ -1852,7 +1867,8 @@ def run_full_pipeline(callback=None):
                 if callback: callback(f"  {lbl}: insufficient data, skipping", (idx + 1) / total_h)
                 continue
             (final_models, medians, feat_cols, feat_imp, oos_metrics,
-             fitted_decorrelation, fitted_winsorizer, fitted_rank, fitted_sector_neutralizer) = wf
+             fitted_decorrelation, fitted_winsorizer, fitted_rank, fitted_sector_neutralizer,
+             _cs_sizes) = wf
             if config_h.get("execution_mode") == "single":
                 single_id = config_h.get("single_model_id")
                 if single_id and single_id in final_models:
