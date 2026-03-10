@@ -146,6 +146,7 @@ WIKIPEDIA_INDICES = [
 def _discover_from_wikipedia(callback=None):
     """Scrape Wikipedia pour les constituants de plusieurs grands indices mondiaux."""
     discovered: dict[str, dict] = {}
+    banned_tokens = {"EUROPE", "OTHER", "COMMODITIES", "METALS"}
     for idx in WIKIPEDIA_INDICES:
         try:
             if callback:
@@ -172,6 +173,16 @@ def _discover_from_wikipedia(callback=None):
             count = 0
             for raw in target_table[ticker_col].dropna().astype(str):
                 tck = raw.strip()
+                # Nettoyage agressif pour éviter les pseudo-tickers non Yahoo:
+                # - enlever les préfixes type "OSE: YAR.OL"
+                # - ignorer les entrées génériques comme "EUROPE", "OTHER", etc.
+                if ":" in tck:
+                    tck = tck.split(":", 1)[1].strip()
+                if " " in tck:
+                    # Souvent des libellés ou des préfixes style "OTHER EQUITIES"
+                    continue
+                if tck.upper() in banned_tokens:
+                    continue
                 if not tck or len(tck) > 15:
                     continue
                 if tck.lower() in ("ticker", "symbol", "code", "epic", "stock"):
@@ -447,13 +458,53 @@ def scan_and_expand_universe(callback=None):
     if callback:
         callback(f"After yf.Search: {len(discovered)} tickers")
 
-    # 3) (FMP search désactivé par défaut, API retourne 403)
+    # 3) Nettoyage global des tickers (headers / préfixes d'indices, etc.)
+    GARBAGE_TICKERS = {
+        "EUROPE",
+        "OTHER",
+        "COMMODITIES",
+        "METALS",
+        "CONSUMER",
+        "ENERGY",
+        "FINANCIALS",
+        "HEALTHCARE",
+        "INDUSTRIALS",
+        "MATERIALS",
+        "TECHNOLOGY",
+        "UTILITIES",
+        "TELECOM",
+        "SERVICES",
+        "TRANSPORT",
+        "TOTAL",
+        "INDEX",
+        "VARIOUS",
+        "SECTOR",
+        "BASIC",
+        "CAPITAL",
+        "GOODS",
+        "FOOD",
+    }
+    cleaned: dict[str, dict] = {}
+    for sym, info in discovered.items():
+        # Strip éventuels préfixes de type "OSE: YAR.OL"
+        if ": " in sym:
+            sym = sym.split(": ", 1)[-1].strip()
+        # Enlever les tickers manifestement invalides ou trop longs
+        base = sym.split(".")[0].upper()
+        if base in GARBAGE_TICKERS:
+            continue
+        if len(sym) > 12 or not sym:
+            continue
+        cleaned[sym] = info
+    discovered = cleaned
+
+    # 4) (FMP search désactivé par défaut, API retourne 403)
     #    On n'appelle plus _discover_from_fmp_search() ici.
     if callback:
         callback(f"Total discovered (raw): {len(discovered)} unique tickers")
     logger.info("scan_and_expand_universe: total discovered (raw)=%d", len(discovered))
 
-    # 4) Merge avec univers connu, enrichir ensuite via yfinance (FMP profile → 403)
+    # 5) Merge avec univers connu, enrichir ensuite via yfinance (FMP profile → 403)
     known = portfolio.get_universe() or {}
     known_set = set(known.keys())
     new_tickers = set(discovered.keys()) - known_set
@@ -501,7 +552,7 @@ def scan_and_expand_universe(callback=None):
         logger.warning("scan_and_expand_universe: failed to persist universe_last_scan: %s", e)
     logger.info("scan_and_expand_universe: end")
 
-    # 5) Univers ACTIF filtré par market cap
+    # 6) Univers ACTIF filtré par market cap
     active = {
         t: {
             "shortName": info.get("shortName") or t,
