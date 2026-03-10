@@ -115,6 +115,62 @@ def _conn():
         last_seen_at TEXT,
         is_active INTEGER DEFAULT 1
     )""")
+    # Unified historical data tables (append-only)
+    c.execute("""CREATE TABLE IF NOT EXISTS prices (
+        ticker   TEXT NOT NULL,
+        date     TEXT NOT NULL,
+        open     REAL,
+        high     REAL,
+        low      REAL,
+        close    REAL,
+        volume   REAL,
+        currency TEXT,
+        source   TEXT,
+        PRIMARY KEY (ticker, date)
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS fundamentals (
+        ticker           TEXT NOT NULL,
+        as_of_date       TEXT NOT NULL,
+        currency         TEXT,
+        revenue          REAL,
+        net_income       REAL,
+        eps              REAL,
+        ebitda           REAL,
+        free_cash_flow   REAL,
+        shares_outstanding REAL,
+        market_cap       REAL,
+        pe_ratio         REAL,
+        pb_ratio         REAL,
+        ev_ebitda        REAL,
+        fcf_yield        REAL,
+        dividend_yield   REAL,
+        roe              REAL,
+        gross_margin     REAL,
+        operating_margin REAL,
+        net_margin       REAL,
+        debt_to_equity   REAL,
+        current_ratio    REAL,
+        peg_ratio        REAL,
+        sector           TEXT,
+        industry         TEXT,
+        country          TEXT,
+        exchange         TEXT,
+        source           TEXT,
+        quality_flag     TEXT,
+        PRIMARY KEY (ticker, as_of_date)
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS macro (
+        date              TEXT PRIMARY KEY,
+        fed_funds_rate    REAL,
+        us_10y_yield      REAL,
+        us_2y_yield       REAL,
+        yield_curve_slope REAL,
+        cpi_yoy           REAL,
+        oil_price         REAL,
+        vix               REAL,
+        credit_spread     REAL,
+        source            TEXT
+    )""")
     c.commit()
     return c
 
@@ -257,6 +313,129 @@ def set_system_config(domain, value):
     c.execute("INSERT OR REPLACE INTO system_config (domain, value) VALUES (?, ?)",
              (domain, json.dumps(value, default=str)))
     c.commit(); c.close()
+
+
+# ══════════════════════════════════════════════════════════════
+# UNIFIED HISTORICAL DATA HELPERS (append-only)
+# ══════════════════════════════════════════════════════════════
+def upsert_prices(rows):
+    """
+    Insert price rows into the unified prices table.
+    rows: iterable of dicts with keys:
+      ticker, date, open, high, low, close, volume, currency, source
+    Append-only: existing (ticker, date) pairs are left untouched.
+    """
+    if not rows:
+        return
+    c = _conn()
+    try:
+        c.executemany(
+            """
+            INSERT OR IGNORE INTO prices
+            (ticker,date,open,high,low,close,volume,currency,source)
+            VALUES (:ticker,:date,:open,:high,:low,:close,:volume,:currency,:source)
+            """,
+            rows,
+        )
+        c.commit()
+    finally:
+        c.close()
+
+
+def upsert_fundamentals(rows):
+    """
+    Insert fundamental rows into the unified fundamentals table.
+    rows: iterable de dicts au format canonique de la table fundamentals.
+    Append-only: INSERT OR IGNORE sur (ticker, as_of_date).
+    """
+    if not rows:
+        return
+    c = _conn()
+    try:
+        c.executemany(
+            """
+            INSERT OR IGNORE INTO fundamentals
+            (ticker,as_of_date,currency,revenue,net_income,eps,ebitda,free_cash_flow,
+             shares_outstanding,market_cap,pe_ratio,pb_ratio,ev_ebitda,fcf_yield,
+             dividend_yield,roe,gross_margin,operating_margin,net_margin,
+             debt_to_equity,current_ratio,peg_ratio,sector,industry,country,exchange,
+             source,quality_flag)
+            VALUES
+            (:ticker,:as_of_date,:currency,:revenue,:net_income,:eps,:ebitda,:free_cash_flow,
+             :shares_outstanding,:market_cap,:pe_ratio,:pb_ratio,:ev_ebitda,:fcf_yield,
+             :dividend_yield,:roe,:gross_margin,:operating_margin,:net_margin,
+             :debt_to_equity,:current_ratio,:peg_ratio,:sector,:industry,:country,:exchange,
+             :source,:quality_flag)
+            """,
+            rows,
+        )
+        c.commit()
+    finally:
+        c.close()
+
+
+def upsert_macro(rows):
+    """
+    Insert macro rows into unified macro table.
+    rows: iterable de dicts {'date', 'fed_funds_rate', ..., 'source'}.
+    Append-only: INSERT OR IGNORE sur date.
+    """
+    if not rows:
+        return
+    c = _conn()
+    try:
+        c.executemany(
+            """
+            INSERT OR IGNORE INTO macro
+            (date,fed_funds_rate,us_10y_yield,us_2y_yield,yield_curve_slope,
+             cpi_yoy,oil_price,vix,credit_spread,source)
+            VALUES
+            (:date,:fed_funds_rate,:us_10y_yield,:us_2y_yield,:yield_curve_slope,
+             :cpi_yoy,:oil_price,:vix,:credit_spread,:source)
+            """,
+            rows,
+        )
+        c.commit()
+    finally:
+        c.close()
+
+
+def load_prices_ticker(ticker):
+    """Return list of (date, open, high, low, close, volume, currency) for a ticker."""
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT date, open, high, low, close, volume, currency FROM prices WHERE ticker=? ORDER BY date",
+            (ticker,),
+        ).fetchall()
+        return [tuple(r) for r in rows]
+    finally:
+        c.close()
+
+
+def load_fundamentals_ticker(ticker):
+    """Return list of canonical fundamentals rows for ticker (oldest first)."""
+    c = _conn()
+    try:
+        cur = c.execute(
+            "SELECT * FROM fundamentals WHERE ticker=? ORDER BY as_of_date",
+            (ticker,),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        c.close()
+
+
+def load_macro_series():
+    """Return full macro series as list of dicts (oldest first)."""
+    c = _conn()
+    try:
+        cur = c.execute("SELECT * FROM macro ORDER BY date")
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        c.close()
 
 def compute_pnl(holdings_list, fx_rate=1.08, gbp_rate=1.16, base="EUR"):
     total_val = 0; total_cost = 0; sectors = {}
