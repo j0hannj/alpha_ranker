@@ -1012,12 +1012,18 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
     meta=["ticker","name","sector","target_12m"]
     fcols=[c for c in df.columns if c not in meta and df[c].dtype in [np.float64,np.int64,float,int]]
     X=df[fcols].copy(); y=df["target_12m"].copy()
-    medians=X.median(); X=X.fillna(medians).replace([np.inf,-np.inf],np.nan).fillna(medians)
+    medians=X.median()
+    X=X.fillna(medians).replace([np.inf,-np.inf],np.nan).fillna(medians)
     # Rank transform + sector neutralize
     X = rank_features(X, fcols)
     X_neut = X.copy(); X_neut["sector"]=df["sector"].values
     X_neut = sector_neutralize(X_neut,fcols,"sector")
     X = X_neut.drop(columns=["sector"],errors="ignore")
+    # Safety net: some sector-neutralization implementations can reintroduce NaNs.
+    # Ensure the training matrix is fully finite before passing to sklearn models.
+    X = X.replace([np.inf, -np.inf], np.nan)
+    # Fill remaining NaNs with 0 (neutral value in ranked/neutralized space)
+    X = X.fillna(0.0)
     if callback: callback("Training ensemble (simple mode)...")
     ensemble = {}
     for name,m in _get_models().items():
