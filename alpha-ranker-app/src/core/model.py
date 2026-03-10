@@ -1202,7 +1202,7 @@ def run_full_pipeline(callback=None):
             config = {}
         fund_db = fetch_all_fundamentals(list(yf_fund.keys()),fmp_key,callback)
         if len(fund_db)<30:
-            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="fmp_few_tickers") + (None,)
+            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="fmp_few_tickers")
         horizons = (config or {}).get("horizons", [3, 6, 12, 24, 120])
         primary_H = (config or {}).get("primary_horizon", 12)
         ref_year = as_of_date.year if as_of_date else datetime.now().year
@@ -1232,7 +1232,7 @@ def run_full_pipeline(callback=None):
             all_horizon_results[H] = {"results": results_h,"feat_imp": feat_imp,"oos_metrics": oos_metrics,"blend": blend}
             if callback: callback(f"  {lbl} done: IC={oos_metrics.get('spearman_rank_corr','?')} | {len(results_h)} stocks", (idx + 1) / total_h)
         if not all_horizon_results:
-            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="all_horizons_failed") + (None,)
+            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="all_horizons_failed")
         primary = all_horizon_results.get(primary_H) or next(iter(all_horizon_results.values()))
         results = primary["results"]
         feat_imp = primary["feat_imp"]
@@ -1250,7 +1250,7 @@ def run_full_pipeline(callback=None):
         _store_model_state(None, None, None, prices, fund_db, sector_map, yf_fund)
     else:
         if callback: callback("Simple mode (no FMP key)")
-        return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="no_fmp_key") + (None,)
+        return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="no_fmp_key")
     data_freshness = alldata.get("data_freshness")
     if data_freshness:
         model_info["data_freshness"] = data_freshness
