@@ -133,6 +133,7 @@ You can request actions by including these tags in your response:
 [ACTION:compare:TICKER1:TICKER2] - Compare two stocks
 [ACTION:project:TICKER] - Monte Carlo price projection for a holding
 [ACTION:fill_missing:TICKER:FIELD] - Search web to fill missing data for a ticker
+[ACTION:fetch_large_cap_isins:COUNT] - Fetch ISIN for the COUNT largest stocks by market cap (e.g. 2500 or 4000). Use when user wants more ISINs. Example: [ACTION:fetch_large_cap_isins:4000]
 
 == MISSING DATA PROTOCOL ==
 If you detect that a ticker has missing fundamentals, ratios, or data (shown as None/NaN
@@ -294,6 +295,7 @@ def parse_actions(response_text):
         (r'\[ACTION:compare:([A-Z0-9.-]+):([A-Z0-9.-]+)\]', "compare", None),
         (r'\[ACTION:project:([A-Z0-9.-]+)\]', "project", None),
         (r'\[ACTION:fill_missing:([A-Z0-9.-]+):(\w+)\]', "fill_missing", None),
+        (r'\[ACTION:fetch_large_cap_isins:(\d+)\]', "fetch_large_cap_isins", None),
     ]
     for pattern, action_type, default_args in patterns:
         for match in re.finditer(pattern, response_text):

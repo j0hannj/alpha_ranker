@@ -147,6 +147,17 @@ class AlphaRanker(ctk.CTk):
         if t=="refresh_prices": threading.Thread(target=self._refresh_prices,daemon=True).start()
         elif t=="run_model": self._run_model()
         elif t=="analyze" and args: self._stock_popup(args[0])
+        elif t=="fetch_large_cap_isins" and args:
+            try: count=int(args[0]); count=max(2500,min(5000,count))
+            except: count=4000
+            def _fetch():
+                for k,s in [("fmp_key","FMP_API_KEY")]:
+                    v=portfolio.get_setting(k)
+                    if v: os.environ[s]=v
+                def cb(m): self.after(0,lambda m=m:self._clog(m))
+                r=data.fetch_large_cap_isins(target=count,callback=cb)
+                self.after(0,lambda:self._clog(f"ISIN: {len(r)} en base (objectif {count})."))
+            threading.Thread(target=_fetch,daemon=True).start()
         elif t=="search_news" and args:
             def _s():
                 from core.news import build_news_context

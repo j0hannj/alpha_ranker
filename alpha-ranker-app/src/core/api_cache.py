@@ -33,6 +33,30 @@ def get_cached_ticker_list():
         return []
 
 
+def get_tickers_by_market_cap():
+    """(ticker, market_cap) triés par market_cap décroissant (pour plus grosses cap)."""
+    try:
+        c = _conn()
+        rows = c.execute(
+            "SELECT cache_key, data FROM api_cache WHERE source = ?",
+            ("yahoo_info",),
+        ).fetchall()
+        c.close()
+        out = []
+        for cache_key, data_json in rows:
+            try:
+                d = json.loads(data_json) if data_json else {}
+                mc = d.get("marketCap")
+                if mc is not None and isinstance(mc, (int, float)) and mc > 0:
+                    out.append((cache_key, float(mc)))
+            except Exception:
+                pass
+        out.sort(key=lambda x: -x[1])
+        return out
+    except Exception:
+        return []
+
+
 def get_cache_status():
     """
     État du cache: nb entrées par source, années disponibles, nombre de tickers/ISIN.

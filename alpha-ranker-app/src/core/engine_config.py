@@ -29,6 +29,7 @@ DEFAULT_DATA_SETTINGS = {
     "data_start_year": 2011,
     "data_max_history_years": 15,
     "data_min_tickers": 2500,
+    "data_min_isins": 2500,
     "data_universe_source": "fmp_then_indices",
 }
 

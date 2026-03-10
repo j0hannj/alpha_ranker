@@ -274,30 +274,108 @@ def fetch_prices(tickers):
             prices[t] = r
     return prices
 
-# ── ISIN (FMP profile, pour affichage) ─────────────────────────
-def fetch_isins_fmp(tickers, api_key, callback=None, chunk_size=50):
+# ── ISIN (FMP profile / bulk, objectif 2500–4000+) ───────────────
+def get_largest_tickers_by_market_cap(n=4000, callback=None):
     """
-    Récupère les ISIN via FMP company profile. Met à jour le cache isin_map (ticker -> isin).
-    Les ISIN restent en DB même si l'API ne les renvoie plus ensuite.
+    Retourne les n plus gros tickers par market cap (cache yahoo_info).
+    Si pas assez en cache, complète avec l'univers stocké.
+    """
+    from .api_cache import get_tickers_by_market_cap, get_stored_universe_list
+    by_cap = get_tickers_by_market_cap()
+    tickers = [t for t, _ in by_cap[:n]]
+    if len(tickers) < n:
+        stored = get_stored_universe_list()
+        for t in stored:
+            if t not in tickers:
+                tickers.append(t)
+                if len(tickers) >= n:
+                    break
+    if callback:
+        callback(f"Data: {len(tickers)} plus grosses cap pour ISIN (objectif {n})")
+    return tickers[:n]
+
+
+def fetch_large_cap_isins(target=4000, callback=None):
+    """
+    Récupère au moins target ISIN (2500 ou 4000) pour les plus grosses capitalisations.
+    Peut être lancé par l'agent IA [ACTION:fetch_large_cap_isins:4000].
+    """
+    api_key = os.environ.get("FMP_API_KEY")
+    if not api_key:
+        if callback:
+            callback("Clé FMP requise pour récupérer les ISIN (Settings).")
+        return {}
+    tickers = get_largest_tickers_by_market_cap(n=target, callback=callback)
+    return fetch_isins_fmp(tickers, api_key, callback=callback, min_isins=target)
+
+
+def fetch_isins_fmp(tickers, api_key, callback=None, chunk_size=5, min_isins=None):
+    """
+    Récupère au moins min_isins (ou data_min_isins) ISIN via FMP.
+    Essaie d'abord le bulk (profile-bulk?part=N), sinon profile un par un.
+    Met à jour le cache isin_map (ticker -> isin). Sauvegarde incrémentale.
     """
     from .api_cache import get_isin_map, set_isin_map
     if not api_key or not tickers:
         return {}
-    out = dict(get_isin_map())
-    for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i : i + chunk_size]
-        syms = ",".join(chunk)
+    if min_isins is not None:
+        target = max(1000, int(min_isins))
+    else:
         try:
-            url = f"https://financialmodelingprep.com/api/v3/profile/{syms}?apikey={api_key}"
-            with urllib.request.urlopen(url, timeout=30) as r:
+            from .engine_config import get_data_settings
+            target = max(1000, int(get_data_settings().get("data_min_isins", 2500)))
+        except Exception:
+            target = 2500
+    out = dict(get_isin_map())
+    target = max(target, len(out))
+
+    # 1) Essai bulk (paginated): beaucoup d'ISIN en peu d'appels
+    for part in range(20):
+        try:
+            url = f"https://financialmodelingprep.com/api/v4/profile/bulk?part={part}&apikey={api_key}"
+            with urllib.request.urlopen(url, timeout=45) as r:
                 data = json.loads(r.read().decode())
+            if not data:
+                break
             for item in (data or []):
                 sym = (item.get("symbol") or "").strip()
                 isin = (item.get("isin") or "").strip()
                 if sym and isin and len(isin) >= 10:
                     out[sym] = isin
-            if callback and (i + chunk_size) % 200 == 0:
-                callback(f"Data: ISIN {min(i + chunk_size, len(tickers))}/{len(tickers)}")
+            if callback:
+                callback(f"Data: ISIN bulk part {part} → {len(out)}")
+            if len(out) >= target:
+                set_isin_map(out)
+                return out
+        except Exception:
+            break
+
+    # 2) Fallback: profile un par un (ou petit batch si l'API l'accepte) pour les tickers manquants
+    need = [t for t in tickers if t not in out]
+    if len(out) >= target:
+        set_isin_map(out)
+        return out
+    for i in range(0, min(len(need), max(target - len(out), 2500)), chunk_size):
+        chunk = need[i : i + chunk_size]
+        for sym in chunk:
+            try:
+                url = f"https://financialmodelingprep.com/api/v3/profile/{sym}?apikey={api_key}"
+                with urllib.request.urlopen(url, timeout=15) as r:
+                    data = json.loads(r.read().decode())
+                for item in (data or []):
+                    s = (item.get("symbol") or "").strip()
+                    isin = (item.get("isin") or "").strip()
+                    if s and isin and len(isin) >= 10:
+                        out[s] = isin
+            except Exception:
+                pass
+        if (i + chunk_size) % 200 < chunk_size and callback:
+            callback(f"Data: ISIN {len(out)} (objectif {target})")
+        if len(out) >= target:
+            break
+        try:
+            import time
+            time.sleep(0.05)
         except Exception:
             pass
     set_isin_map(out)
