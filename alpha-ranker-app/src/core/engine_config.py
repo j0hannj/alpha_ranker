@@ -33,7 +33,8 @@ DEFAULT_UNIVERSE_SETTINGS = {
         "XETRA",
         "LSE",
     ],
-    "fmp_min_market_cap": 500_000_000,
+    # Par défaut: pas de filtre capi pour l'univers actif (tu peux le remonter dans les settings si besoin)
+    "fmp_min_market_cap": 0,
     "fmp_screener_limit": 3000,
     "auto_scan": True,
     "scan_frequency_hours": 24,
