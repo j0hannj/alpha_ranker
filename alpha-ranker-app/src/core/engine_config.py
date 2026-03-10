@@ -23,6 +23,28 @@ DOMAIN_PORTFOLIO = "portfolio_settings"
 DOMAIN_TRANSACTION_COST = "transaction_cost_settings"
 DOMAIN_FEATURE = "feature_settings"
 DOMAIN_RISK = "risk_settings"
+DOMAIN_UNIVERSE = "universe_settings"
+
+# Universe: FMP exchanges + yfinance fallback sources (toutes les listes ici, plus en dur dans data.py)
+DEFAULT_UNIVERSE_SETTINGS = {
+    "fmp_exchanges": [
+        "NYSE,NASDAQ,AMEX",
+        "EURONEXT",
+        "XETRA",
+        "LSE",
+    ],
+    "fmp_min_market_cap": 500_000_000,
+    "fmp_screener_limit": 2000,
+    "yf_etf_tickers": ["SPY", "QQQ", "IWM", "VGK", "EFA", "EEM"],
+    "yf_search_queries": [
+        "large cap technology stocks",
+        "large cap healthcare stocks",
+        "large cap financial stocks",
+        "large cap energy stocks",
+        "large cap industrial stocks",
+        "European large cap stocks",
+    ],
+}
 
 # Data fetch: historique année par année, reprise possible
 DEFAULT_DATA_SETTINGS = {
@@ -203,6 +225,12 @@ def get_data_settings() -> dict:
     return _deep_merge(DEFAULT_DATA_SETTINGS, raw)
 
 
+def get_universe_settings() -> dict:
+    """Universe construction: FMP exchanges, yfinance ETFs and search queries. No hardcoded lists in data layer."""
+    raw = get_system_config(DOMAIN_UNIVERSE)
+    return _deep_merge(DEFAULT_UNIVERSE_SETTINGS, raw)
+
+
 def get_enabled_feature_columns() -> list:
     """List of feature column names that are enabled by current feature_settings."""
     feat = get_feature_settings()
@@ -245,6 +273,7 @@ def init_default_config():
         (DOMAIN_PORTFOLIO, DEFAULT_PORTFOLIO_SETTINGS),
         (DOMAIN_TRANSACTION_COST, DEFAULT_TRANSACTION_COST_SETTINGS),
         (DOMAIN_RISK, DEFAULT_RISK_SETTINGS),
+        (DOMAIN_UNIVERSE, DEFAULT_UNIVERSE_SETTINGS),
     ]:
         if get_system_config(domain) is None:
             set_system_config(domain, default)
