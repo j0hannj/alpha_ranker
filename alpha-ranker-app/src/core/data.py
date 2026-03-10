@@ -1091,6 +1091,32 @@ def fetch_large_cap_isins(target=4000, callback=None):
     return fetch_isins_fmp(tickers, api_key, callback=callback, min_isins=target)
 
 
+def enrich_universe_isins(callback=None):
+    """
+    Enrichit le mapping ISIN pour tous les tickers de l'univers actuel (table universe).
+    Utilise FMP (bulk + profile) pour résoudre un maximum d'ISIN. Met à jour isin_map.
+    """
+    try:
+        from . import portfolio as _pf
+        universe = _pf.get_universe() or {}
+        tickers = list(universe.keys())
+    except Exception as e:
+        logger.warning("enrich_universe_isins: get_universe failed: %s", e)
+        tickers = []
+    if not tickers:
+        if callback:
+            callback("Aucun ticker dans l'univers.")
+        return {}
+    api_key = os.environ.get("FMP_API_KEY")
+    if not api_key:
+        if callback:
+            callback("Clé FMP requise (Settings).")
+        return {}
+    if callback:
+        callback("Enrichissement ISIN pour %d titres…" % len(tickers))
+    return fetch_isins_fmp(tickers, api_key, callback=callback, min_isins=len(tickers))
+
+
 def fetch_isins_fmp(tickers, api_key, callback=None, chunk_size=5, min_isins=None):
     """
     Récupère au moins min_isins (ou data_min_isins) ISIN via FMP.

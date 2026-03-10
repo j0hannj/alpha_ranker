@@ -1597,9 +1597,11 @@ class AlphaRanker(ctk.CTk):
         self._universe_region_combo.grid(row=0,column=3,padx=(0,8),pady=2)
         self._btn_auto_fill=ctk.CTkButton(autofill,text="Remplir automatiquement",width=180,height=28,font=("",10),fg_color="#4f46e5",command=self._on_auto_fill_clicked)
         self._btn_auto_fill.grid(row=0,column=4,padx=4,pady=2)
-        self._universe_progress=ctk.CTkProgressBar(autofill,width=200,height=8); self._universe_progress.grid(row=0,column=5,padx=8,pady=2); self._universe_progress.grid_remove()
-        self._universe_status_lbl=ctk.CTkLabel(autofill,text="",font=("",9),text_color="#71717a"); self._universe_status_lbl.grid(row=0,column=6,padx=4,pady=2); self._universe_status_lbl.grid_remove()
-        self._btn_auto_fill_cancel=ctk.CTkButton(autofill,text="Annuler",width=80,height=28,font=("",10),fg_color="#7f1d1d",command=self._on_auto_fill_cancel); self._btn_auto_fill_cancel.grid(row=0,column=7,padx=4,pady=2); self._btn_auto_fill_cancel.grid_remove()
+        self._btn_enrich_isins=ctk.CTkButton(autofill,text="Enrichir ISIN",width=100,height=28,font=("",10),fg_color="#166534",command=self._on_enrich_isins_clicked)
+        self._btn_enrich_isins.grid(row=0,column=5,padx=4,pady=2)
+        self._universe_progress=ctk.CTkProgressBar(autofill,width=200,height=8); self._universe_progress.grid(row=0,column=6,padx=8,pady=2); self._universe_progress.grid_remove()
+        self._universe_status_lbl=ctk.CTkLabel(autofill,text="",font=("",9),text_color="#71717a"); self._universe_status_lbl.grid(row=0,column=7,padx=4,pady=2); self._universe_status_lbl.grid_remove()
+        self._btn_auto_fill_cancel=ctk.CTkButton(autofill,text="Annuler",width=80,height=28,font=("",10),fg_color="#7f1d1d",command=self._on_auto_fill_cancel); self._btn_auto_fill_cancel.grid(row=0,column=8,padx=4,pady=2); self._btn_auto_fill_cancel.grid_remove()
         self._universe_auto_fill_cancel_event=None
         # Left: list of tickers (Treeview) + add ISIN manually
         left=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8,width=220); left.grid(row=2,column=0,sticky="nsew",padx=(0,4),pady=0)
@@ -1756,6 +1758,52 @@ class AlphaRanker(ctk.CTk):
             self.after(0, lambda r=result: self._on_auto_fill_complete(r))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_enrich_isins_clicked(self):
+        """Enrichit le mapping ISIN pour tous les tickers de l'univers (FMP)."""
+        try:
+            from core import portfolio
+            fmp_key = getattr(portfolio, "get_setting", None) and portfolio.get_setting("fmp_key")
+            if fmp_key:
+                os.environ["FMP_API_KEY"] = fmp_key
+            else:
+                messagebox.showwarning("ISIN", "Clé FMP requise (Settings).")
+                return
+        except Exception as e:
+            messagebox.showerror("ISIN", "Erreur: %s" % e)
+            return
+        self._btn_enrich_isins.configure(state="disabled")
+        self._universe_progress.set(0)
+        self._universe_progress.grid()
+        self._universe_status_lbl.grid()
+        self._universe_status_lbl.configure(text="Enrichissement ISIN…")
+
+        def scan_cb(msg):
+            def _update():
+                self._universe_status_lbl.configure(text=str(msg)[:85])
+            self.after(0, _update)
+
+        def worker():
+            try:
+                from core import data as core_data
+                result = core_data.enrich_universe_isins(callback=scan_cb)
+                n = len(result)
+                self.after(0, lambda: self._on_enrich_isins_complete(n))
+            except Exception as e:
+                logger.warning("_on_enrich_isins_clicked failed: %s", e)
+                self.after(0, lambda: self._on_enrich_isins_complete(0, str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_enrich_isins_complete(self, n_isins, error=None):
+        self._btn_enrich_isins.configure(state="normal")
+        self._universe_progress.grid_remove()
+        self._universe_status_lbl.grid_remove()
+        self._universe_fill_tickers()
+        if error:
+            messagebox.showerror("ISIN", "Erreur: %s" % error)
+        else:
+            messagebox.showinfo("ISIN", "Enrichissement terminé. %d ISIN enregistrés." % n_isins)
 
     def _on_auto_fill_cancel(self):
         if getattr(self,"_universe_auto_fill_cancel_event",None):
