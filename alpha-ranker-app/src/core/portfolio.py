@@ -88,6 +88,26 @@ def _conn():
     for col, spec in [("run_date", "TEXT"), ("alpha_score_raw", "REAL"), ("predicted_return_pct", "REAL"), ("model_agreement", "REAL")]:
         if col not in rh_info:
             c.execute(f"ALTER TABLE ranking_history ADD COLUMN {col} {spec}")
+    c.execute("""CREATE TABLE IF NOT EXISTS model_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        run_timestamp TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        mean_ic REAL,
+        spearman_rank_corr REAL,
+        hit_rate REAL,
+        ic_ir REAL,
+        n_stocks INTEGER,
+        n_features INTEGER,
+        prediction_horizon_months INTEGER,
+        horizons_trained TEXT,
+        per_model_ic TEXT,
+        is_degraded INTEGER DEFAULT 0,
+        fund_source TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    c.execute("""CREATE INDEX IF NOT EXISTS idx_model_runs_timestamp ON model_runs(run_timestamp DESC)""")
+    c.execute("""CREATE INDEX IF NOT EXISTS idx_model_runs_run_id ON model_runs(run_id)""")
     c.execute("""CREATE TABLE IF NOT EXISTS trade_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         holding_id INTEGER,
@@ -709,6 +729,78 @@ def get_current_run_timestamp():
     row = c.execute("SELECT timestamp FROM ranking_history ORDER BY timestamp DESC LIMIT 1").fetchone()
     c.close()
     return row[0] if row else None
+
+
+def save_model_run(model_info, run_id=None):
+    """Store one row per model run for stability tracking (IC, hit rate, mode, etc.). Use same run_id as save_ranking_snapshot to link runs."""
+    if not model_info or not isinstance(model_info, dict):
+        return
+    run_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    run_id = run_id or datetime.now().isoformat()
+    mode = model_info.get("mode") or "unknown"
+    mean_ic = model_info.get("mean_ic")
+    mean_ic = float(mean_ic) if mean_ic is not None and (isinstance(mean_ic, float) and mean_ic == mean_ic or isinstance(mean_ic, (int, float))) else None
+    spearman = model_info.get("spearman_rank_corr")
+    spearman = float(spearman) if spearman is not None and (isinstance(spearman, float) and spearman == spearman or isinstance(spearman, (int, float))) else None
+    hit_rate = model_info.get("hit_rate")
+    hit_rate = float(hit_rate) if hit_rate is not None and (isinstance(hit_rate, float) and hit_rate == hit_rate or isinstance(hit_rate, (int, float))) else None
+    ic_ir = model_info.get("ic_ir")
+    ic_ir = float(ic_ir) if ic_ir is not None and (isinstance(ic_ir, float) and ic_ir == ic_ir or isinstance(ic_ir, (int, float))) else None
+    n_stocks = model_info.get("n_stocks")
+    n_stocks = int(n_stocks) if n_stocks is not None else None
+    n_features = model_info.get("n_features")
+    n_features = int(n_features) if n_features is not None else None
+    horizon = model_info.get("prediction_horizon_months")
+    horizon = int(horizon) if horizon is not None else None
+    horizons_trained = model_info.get("horizons_trained")
+    horizons_trained = json.dumps(horizons_trained) if horizons_trained is not None else None
+    per_model_ic = model_info.get("per_model_ic") or model_info.get("per_model_ic")
+    per_model_ic = json.dumps(per_model_ic) if per_model_ic is not None else None
+    is_degraded = 1 if model_info.get("is_degraded") else 0
+    fund_source = model_info.get("fund_source")
+    c = None
+    try:
+        c = _conn()
+        c.execute(
+            """INSERT INTO model_runs (run_id, run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, ic_ir, n_stocks, n_features, prediction_horizon_months, horizons_trained, per_model_ic, is_degraded, fund_source)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (run_id, run_ts, mode, mean_ic, spearman, hit_rate, ic_ir, n_stocks, n_features, horizon, horizons_trained, per_model_ic, is_degraded, fund_source),
+        )
+        c.commit()
+    except Exception as e:
+        logger.warning("save_model_run failed: %s", e)
+    finally:
+        if c is not None:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
+def get_model_run_history(limit=50):
+    """Return the last N model runs for stability analysis. Each row: run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, etc."""
+    c = _conn()
+    rows = c.execute(
+        """SELECT run_id, run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, ic_ir, n_stocks, n_features, prediction_horizon_months, horizons_trained, per_model_ic, is_degraded, fund_source
+           FROM model_runs ORDER BY run_timestamp DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    c.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            if d.get("horizons_trained"):
+                d["horizons_trained"] = json.loads(d["horizons_trained"])
+        except Exception:
+            pass
+        try:
+            if d.get("per_model_ic"):
+                d["per_model_ic"] = json.loads(d["per_model_ic"])
+        except Exception:
+            pass
+        out.append(d)
+    return out
 
 
 # ══════════════════════════════════════════════════════════════
