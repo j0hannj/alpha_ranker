@@ -511,7 +511,7 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
             "ic_series":[round(float(v),4) for v in ic_per.values],
             "per_model_ic":{n:round(np.mean(v),4) for n,v in per_model_oos.items() if v}}
     else:
-        oos_metrics = {"n_predictions":0,"per_model_ic":{}}
+        oos_metrics = {"n_predictions":0,"per_model_ic":{},"mean_ic":0,"ic_std":0,"ic_ir":0,"hit_rate":0,"spearman_rank_corr":0}
     if callback:
         callback(f"Ensemble OOS Rank IC: {oos_metrics.get('spearman_rank_corr','?')}")
         for n,ic in oos_metrics.get("per_model_ic",{}).items(): callback(f"  {n}: IC={ic:.4f}")
@@ -980,7 +980,8 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
     assert df["predicted_return_pct"].isna().sum() == 0, f"NaN in predicted_return_pct: {df['predicted_return_pct'].isna().sum()}"
     pm = {n:{"cv_r2":info.get("cv_r2",0)} for n,info in ensemble.items()}
     oos_metrics = {"mode":"simple_ensemble","n_stocks":len(X),"n_features":len(fcols),
-                   "per_model":pm,"blend":blend,"caveat":"Technical features only."}
+                   "per_model":pm,"blend":blend,"caveat":"Technical features only.",
+                   "mean_ic":0,"ic_ir":0,"hit_rate":0.5,"spearman_rank_corr":0}
     return ensemble,medians,fcols,df,feat_imp,oos_metrics
 
 # ══════════════════════════════════════════════════════════════
@@ -1035,18 +1036,23 @@ def assess_model_health(oos_metrics):
     ic = oos_metrics.get("mean_ic", 0)
     icir = oos_metrics.get("ic_ir", 0)
     hit = oos_metrics.get("hit_rate", 0)
+    mode = oos_metrics.get("mode", "")
     if ic is None or (isinstance(ic, float) and ic != ic):
         ic = 0
     if hit is None or (isinstance(hit, float) and hit != hit):
         hit = 0
     if icir is None or (isinstance(icir, float) and icir != icir):
         icir = 0
+    if mode == "simple_ensemble":
+        return "SIMPLE", "#a1a1aa", "Momentum ranking only (no FMP/walk-forward). No OOS IC."
     if ic > 0.05 and icir > 0.5 and hit > 0.6:
         return "STRONG", "#34d399", "Consistent predictive signal detected."
     elif ic > 0.02 and hit > 0.5:
         return "MODERATE", "#fbbf24", "Some signal — rankings may shift between runs."
     elif ic > 0:
         return "WEAK", "#fb923c", "Weak signal — use rankings with caution."
+    elif oos_metrics.get("n_predictions", 0) == 0:
+        return "NO OOS", "#fb923c", "Walk-forward had no OOS periods. Check data/horizon."
     else:
         return "NO SIGNAL", "#f87171", "No predictive power. Rankings are effectively random."
 
@@ -1087,39 +1093,54 @@ def run_full_pipeline(callback=None):
             config = {}
         fund_db = fetch_all_fundamentals(list(yf_fund.keys()),fmp_key,callback)
         if len(fund_db)<30:
-            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"))
-        wf = walk_forward_train(prices,fund_db,macro,sector_map,list(fund_db.keys()),
-                               start_year=2019,callback=callback,config=config,as_of_date=as_of_date)
-        if wf[0] is None:
-            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"))
-        final_models,medians,feat_cols,feat_imp,oos_metrics = wf
-        # Execution mode: single → keep only selected model
-        if config and config.get("execution_mode") == "single":
-            single_id = config.get("single_model_id")
-            if single_id and single_id in final_models:
-                final_models = {single_id: final_models[single_id]}
-        results,blend = predict_current(final_models,medians,feat_cols,prices,fund_db,
-                                        macro,sector_map,list(yf_fund.keys()),
-                                        yf_info=yf_fund,callback=callback,config=config,as_of_date=as_of_date)
-        if sentiment: results["news_sentiment"]=results["ticker"].map(sentiment).fillna(0)
-        H = (config or {}).get("prediction_horizon_months", 12)
-        model_info = {"mode":"walk_forward_ensemble","n_features":len(feat_cols),"blend":blend,"prediction_horizon_months":H,**oos_metrics}
+            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness")) + (None,)
+        horizons = (config or {}).get("horizons", [3, 6, 12, 24])
+        primary_H = (config or {}).get("primary_horizon", 12)
+        all_horizon_results = {}
+        for H in horizons:
+            if callback: callback(f"═══ Training {H}M horizon ═══")
+            config_h = {**(config or {}), "prediction_horizon_months": H}
+            wf = walk_forward_train(prices,fund_db,macro,sector_map,list(fund_db.keys()),
+                                   start_year=2019,horizon_months=H,callback=callback,config=config_h,as_of_date=as_of_date)
+            if wf[0] is None:
+                if callback: callback(f"  {H}M: insufficient data, skipping")
+                continue
+            final_models,medians,feat_cols,feat_imp,oos_metrics = wf
+            if config_h.get("execution_mode") == "single":
+                single_id = config_h.get("single_model_id")
+                if single_id and single_id in final_models:
+                    final_models = {single_id: final_models[single_id]}
+            results_h,blend = predict_current(final_models,medians,feat_cols,prices,fund_db,
+                                            macro,sector_map,list(yf_fund.keys()),
+                                            yf_info=yf_fund,callback=callback,config=config_h,as_of_date=as_of_date)
+            if sentiment: results_h["news_sentiment"] = results_h["ticker"].map(sentiment).fillna(0)
+            all_horizon_results[H] = {"results": results_h,"feat_imp": feat_imp,"oos_metrics": oos_metrics,"blend": blend}
+            if callback: callback(f"  {H}M: IC={oos_metrics.get('spearman_rank_corr','?')} | {len(results_h)} stocks")
+        if not all_horizon_results:
+            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness")) + (None,)
+        primary = all_horizon_results.get(primary_H) or next(iter(all_horizon_results.values()))
+        results = primary["results"]
+        feat_imp = primary["feat_imp"]
+        oos_metrics = primary["oos_metrics"]
+        n_f = len(primary["feat_imp"]) if isinstance(primary["feat_imp"], (list, dict)) else 0
+        model_info = {"mode":"walk_forward_ensemble","n_features":n_f,"blend":primary["blend"],
+                      "prediction_horizon_months": primary_H,"horizons_trained": list(all_horizon_results.keys()),"primary_horizon": primary_H,
+                      "per_horizon_metrics": {H: d["oos_metrics"] for H,d in all_horizon_results.items()}, **oos_metrics}
         try:
             from core.engine_config import get_risk_settings
             regime_config = get_risk_settings()
         except Exception:
             regime_config = {}
         model_info["market_regime"] = detect_market_regime(prices, macro, regime_config=regime_config)
-        # Store full model state for explanations
-        _store_model_state(final_models, medians, feat_cols, prices, fund_db, sector_map, yf_fund)
+        _store_model_state(None, None, None, prices, fund_db, sector_map, yf_fund)
     else:
         if callback: callback("Simple mode (no FMP key)")
-        return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"))
+        return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness")) + (None,)
     data_freshness = alldata.get("data_freshness")
     if data_freshness:
         model_info["data_freshness"] = data_freshness
-    _save_cache(results,feat_imp,model_info,macro)
-    return results,feat_imp,model_info,macro
+    _save_cache(results,feat_imp,model_info,macro,all_horizons=all_horizon_results)
+    return results,feat_imp,model_info,macro,all_horizon_results
 
 def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,data_freshness=None):
     r = train_simple(prices,yf_fund,macro,callback,sentiment)
@@ -1129,7 +1150,7 @@ def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,dat
     if data_freshness: oos["data_freshness"] = data_freshness
     _store_model_state(ensemble, med, fc, prices, {}, sector_map, yf_fund)
     _save_cache(results,feat_imp,oos,macro)
-    return results,feat_imp,oos,macro
+    return results,feat_imp,oos,macro,None
 
 # ══════════════════════════════════════════════════════════════
 # MODEL STATE (for explainability)
@@ -1153,13 +1174,15 @@ def get_model_state():
     """Retrieve the stored model state for explainability."""
     return _LAST_MODEL_STATE
 
-def _save_cache(results,feat_imp,model_info,macro):
+def _save_cache(results,feat_imp,model_info,macro,all_horizons=None):
     saved_at = datetime.now().isoformat()
     if isinstance(model_info, dict):
         model_info = {**model_info, "saved_at": saved_at}
+    payload = {"results":results,"feat_imp":feat_imp,"model_info":model_info,"macro":macro,"saved_at":saved_at}
+    if all_horizons is not None:
+        payload["all_horizons"] = all_horizons
     with open(MODEL_CACHE,"wb") as f:
-        pickle.dump({"results":results,"feat_imp":feat_imp,"model_info":model_info,
-                     "macro":macro,"saved_at":saved_at},f)
+        pickle.dump(payload,f)
 
 def load_cached():
     if MODEL_CACHE.exists():

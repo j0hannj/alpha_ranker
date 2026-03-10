@@ -716,7 +716,11 @@ class AlphaRanker(ctk.CTk):
         if self.model_results is None: return
         hz=int(self.hz_var.get()); sc=lambda r: r if hz==12 else round(r*(hz/12)**0.75,1)
         df50=self.model_results.head(50).copy()
-        db_path=str(getattr(portfolio,"DB_PATH",None) or "")
+        _dp=getattr(portfolio,"DB_PATH",None)
+        try:
+            db_path=str(_dp.resolve()) if _dp else ""
+        except Exception:
+            db_path=str(_dp) if _dp else ""
         prev=portfolio.get_latest_snapshot_before()
         history_by_ticker={} if db_path else {t:portfolio.get_ranking_history(t,20) for t in df50["ticker"].tolist()}
         display_df=add_ranking_insights(df50,prev,history_by_ticker,db_path=db_path if db_path else None)

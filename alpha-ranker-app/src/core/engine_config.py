@@ -46,6 +46,8 @@ DEFAULT_MODEL_SETTINGS = {
     "single_model_id": "LightGBM",
     "ensemble_method": "ic_weighted_average",
     "prediction_horizon_months": 12,
+    "horizons": [3, 6, 12, 24],
+    "primary_horizon": 12,
     "lookback_days": 252,
     "training_window_years": 3,
     "retraining_frequency_months": 3,

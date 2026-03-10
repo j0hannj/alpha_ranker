@@ -276,31 +276,42 @@ def save_ranking_snapshot(results_df, run_id=None):
         return
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     run_id = run_id or datetime.now().isoformat()
-    c = _conn()
-    rank_col = "rank" if "rank" in results_df.columns else "alpha_rank"
-    for _, row in results_df.iterrows():
-        ticker = row.get("ticker")
-        if not ticker:
-            continue
-        rank_pos = int(row.get(rank_col, 0)) if rank_col in row.columns else 0
-        alpha = row.get("alpha_score")
-        alpha = float(alpha) if alpha is not None and alpha == alpha else None
-        conf = row.get("confidence")
-        conf = float(conf) if conf is not None and conf == conf else None
-        raw = row.get("alpha_score_raw")
-        raw = float(raw) if raw is not None and raw == raw else None
-        pred = row.get("predicted_return_pct")
-        pred = float(pred) if pred is not None and pred == pred else None
-        agr = row.get("model_agreement_score")
-        agr = float(agr) if agr is not None and agr == agr else None
-        c.execute(
-            """INSERT INTO ranking_history (ticker, alpha_score, rank_position, confidence, timestamp, run_id, run_date, alpha_score_raw, predicted_return_pct, model_agreement)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (ticker, alpha, rank_pos, conf, ts, run_id, ts, raw, pred, agr),
-        )
-    c.commit()
-    c.close()
-    cleanup_old_history(keep_runs=20)
+    try:
+        c = _conn()
+        rank_col = "rank" if "rank" in results_df.columns else "alpha_rank"
+        for _, row in results_df.iterrows():
+            ticker = row.get("ticker")
+            if not ticker:
+                continue
+            rank_pos = int(row.get(rank_col, 0)) if rank_col in row.columns else 0
+            alpha = row.get("alpha_score")
+            alpha = float(alpha) if alpha is not None and alpha == alpha else None
+            conf = row.get("confidence")
+            conf = float(conf) if conf is not None and conf == conf else None
+            raw = row.get("alpha_score_raw")
+            raw = float(raw) if raw is not None and raw == raw else None
+            pred = row.get("predicted_return_pct")
+            pred = float(pred) if pred is not None and pred == pred else None
+            agr = row.get("model_agreement_score")
+            agr = float(agr) if agr is not None and agr == agr else None
+            try:
+                c.execute(
+                    """INSERT INTO ranking_history (ticker, alpha_score, rank_position, confidence, timestamp, run_id, run_date, alpha_score_raw, predicted_return_pct, model_agreement)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (ticker, alpha, rank_pos, conf, ts, run_id, ts, raw, pred, agr),
+                )
+            except sqlite3.OperationalError:
+                c.execute(
+                    """INSERT INTO ranking_history (ticker, alpha_score, rank_position, confidence, timestamp, run_id)
+                       VALUES (?,?,?,?,?,?)""",
+                    (ticker, alpha, rank_pos, conf, ts, run_id),
+                )
+        c.commit()
+        c.close()
+        cleanup_old_history(keep_runs=20)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("save_ranking_snapshot failed: %s", e)
 
 
 def cleanup_old_history(keep_runs=20):
