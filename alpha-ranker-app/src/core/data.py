@@ -44,8 +44,135 @@ def _get_data_config():
         return 2011, 15, 2500
 
 
-# ── UNIVERSE (FMP screener + yfinance fallback, aucun scrape Wikipedia) ────
+# ── UNIVERSE (FMP screener + DB persistence, découverte automatique) ────────
 UNIVERSE_CACHE = CACHE_DIR / "universe_cache.json"
+
+
+def scan_and_expand_universe(callback=None):
+    """
+    Scan markets via FMP screener to discover new stocks.
+    Merge with known universe from DB and persist. Called at start of fetch_all_data.
+    Returns dict ticker -> {shortName, sector, marketCap, currentPrice, ...} (fundamentals format).
+    """
+    api_key = os.environ.get("FMP_API_KEY")
+    try:
+        from . import portfolio
+        from .engine_config import get_universe_settings
+    except Exception as e:
+        logger.warning("scan_and_expand_universe imports: %s", e)
+        return _load_known_universe_as_fundamentals()
+
+    # Optional: skip scan if last scan was recent
+    uv = get_universe_settings()
+    scan_freq_h = uv.get("scan_frequency_hours", 24)
+    if scan_freq_h and scan_freq_h > 0:
+        try:
+            last = portfolio.get_setting("universe_last_scan")
+            if last:
+                from datetime import datetime as dt
+                last_dt = dt.fromisoformat(last)
+                if (datetime.now() - last_dt).total_seconds() < scan_freq_h * 3600:
+                    if callback:
+                        callback("Universe: using cached scan (recent).")
+                    return _load_known_universe_as_fundamentals()
+        except Exception:
+            pass
+
+    if not api_key:
+        if callback:
+            callback("FMP key needed to discover new stocks. Set it in Settings.")
+        return _load_known_universe_as_fundamentals()
+
+    exchange_list = uv.get("fmp_exchanges") or []
+    min_cap = uv.get("fmp_min_market_cap") or 500_000_000
+    limit = uv.get("fmp_screener_limit") or 3000
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    discovered = {}
+    for exchange_str in exchange_list:
+        label = exchange_str.split(",")[0] if exchange_str else "?"
+        try:
+            if callback:
+                callback(f"Scanning {label}...")
+            url = (
+                "https://financialmodelingprep.com/api/v3/stock-screener"
+                f"?marketCapMoreThan={int(min_cap)}"
+                f"&isActivelyTrading=true"
+                f"&exchange={exchange_str}"
+                f"&limit={int(limit)}"
+                f"&apikey={api_key}"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.loads(r.read().decode())
+            for item in data or []:
+                sym = item.get("symbol")
+                if not sym:
+                    continue
+                discovered[sym] = {
+                    "name": item.get("companyName"),
+                    "sector": item.get("sector"),
+                    "industry": item.get("industry"),
+                    "marketCap": item.get("marketCap") or item.get("mktCap"),
+                    "price": item.get("price"),
+                    "country": item.get("country"),
+                    "exchange": item.get("exchangeShortName") or label,
+                }
+            if callback:
+                callback(f"  {label}: {len(data) if isinstance(data, list) else 0} stocks found")
+        except Exception as e:
+            logger.warning("FMP screener %s failed: %s", exchange_str, e)
+            if callback:
+                callback(f"  {label} scan error: {e}")
+
+    known = portfolio.get_universe()
+    known_set = set(known.keys())
+    new_tickers = set(discovered.keys()) - known_set
+    if callback:
+        callback(f"Scan complete: {len(discovered)} total, {len(new_tickers)} NEW discoveries")
+
+    # Merge: known + discovered (discovered overwrites for fresh data)
+    full = dict(known)
+    for t, info in discovered.items():
+        full[t] = {
+            "shortName": info.get("name") or t,
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "marketCap": info.get("marketCap"),
+            "currentPrice": info.get("price"),
+            "country": info.get("country"),
+            "exchange": info.get("exchange"),
+            "date": today,
+        }
+
+    portfolio.save_universe(full)
+    try:
+        portfolio.set_setting("universe_last_scan", datetime.now().isoformat())
+    except Exception:
+        pass
+    return full
+
+
+def _load_known_universe_as_fundamentals():
+    """Load known universe from DB and return as fundamentals-style dict."""
+    try:
+        from . import portfolio
+        known = portfolio.get_universe()
+        today = datetime.now().strftime("%Y-%m-%d")
+        return {
+            t: {
+                "shortName": info.get("shortName") or t,
+                "sector": info.get("sector"),
+                "industry": info.get("industry"),
+                "marketCap": info.get("marketCap"),
+                "currentPrice": None,
+                "date": today,
+            }
+            for t, info in known.items()
+        }
+    except Exception as e:
+        logger.warning("_load_known_universe_as_fundamentals: %s", e)
+        return {}
 
 
 def _fetch_universe_fmp(api_key, callback=None):
