@@ -1745,10 +1745,31 @@ class AlphaRanker(ctk.CTk):
         ctk.CTkLabel(self._universe_chart,text=f"Chargement de {ticker}…",text_color="#71717a",font=("",11)).pack(pady=30)
         def _load():
             try:
-                import yfinance as yf
+                import pandas as pd
                 from datetime import datetime, timedelta
-                end=datetime.now(); start=end-timedelta(days=365*5)
-                hist=yf.Ticker(ticker).history(start=start,end=end,auto_adjust=True)
+                from pathlib import Path
+                # 1) Essayer d'utiliser le cache de prix (jusqu'à 15 ans)
+                db_dir = Path(__file__).parent.parent / "db"
+                p_path = db_dir / "prices.parquet"
+                hist = None
+                if p_path.exists():
+                    prices = pd.read_parquet(p_path)
+                    if isinstance(prices.columns, pd.MultiIndex):
+                        col = (ticker, "Close")
+                        if col in prices.columns:
+                            close = prices[col].dropna()
+                        else:
+                            close = None
+                    else:
+                        close = prices[ticker].dropna() if ticker in prices.columns else None
+                    if close is not None and not close.empty:
+                        hist = close.to_frame(name="Close")
+                if hist is None:
+                    # 2) Fallback: yfinance 15 ans
+                    import yfinance as yf
+                    end = datetime.now()
+                    start = end - timedelta(days=365 * 15)
+                    hist = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=True)
                 if hist is None or hist.empty:
                     self.after(0,lambda:self._universe_show_placeholder(ticker,"Pas de données"))
                     return
@@ -1773,7 +1794,7 @@ class AlphaRanker(ctk.CTk):
             close=hist["Close"] if "Close" in hist.columns else hist.iloc[:,0]
             ax.plot(close.index,close.values,color="#818cf8",linewidth=1.5)
             ax.fill_between(close.index,close.values,alpha=0.15,color="#818cf8")
-            ax.set_title(f"{ticker} — Historique (5 ans)",fontsize=12,color="#e4e4e7")
+            ax.set_title(f"{ticker} — Historique (jusqu'à 15 ans)",fontsize=12,color="#e4e4e7")
             ax.tick_params(colors="#71717a",labelsize=9)
             for s in ["top","right"]: ax.spines[s].set_visible(False)
             for s in ["bottom","left"]: ax.spines[s].set_color("#27272a")
