@@ -614,7 +614,8 @@ def _get_feature_importance(models_dict, feat_cols):
 # WALK-FORWARD BACKTESTING
 # ══════════════════════════════════════════════════════════════
 def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
-                       start_year=2019, horizon_months=12, callback=None, config=None, as_of_date=None):
+                       start_year=2019, horizon_months=12, callback=None, config=None, as_of_date=None,
+                       macro_by_region=None):
     """Walk-forward with ensemble. Uses config from DB if not provided. as_of_date: fix date for reproducibility (default: last price date)."""
     try:
         from core.engine_config import get_model_settings, get_feature_settings, get_enabled_feature_columns
@@ -654,9 +655,16 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
                    for m in [1,4,7,10] if datetime(y,m,1) < cutoff]
     if callback: callback(f"Walk-forward: {len(rebal_dates)} periods")
     all_periods = []; meta_cols = ["ticker","date","sector","name","forward_return"]
+    try:
+        from .data import get_region_for_ticker as _get_region
+    except Exception:
+        _get_region = None
     for i,rd in enumerate(rebal_dates):
         if callback and (i+1)%4==0: callback(f"Features: period {i+1}/{len(rebal_dates)}")
-        df = build_features_asof(prices,fundamentals_db,macro,rd,tickers)
+        df = build_features_asof(
+            prices, fundamentals_db, macro, rd, tickers,
+            macro_by_region=macro_by_region, get_region=_get_region if macro_by_region else None,
+        )
         if len(df)==0: continue
         df = add_sector_interactions(df,sector_map)
         df["forward_return"] = df["ticker"].apply(lambda t: compute_forward_return(prices,t,rd,H))
@@ -784,7 +792,8 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
 # CURRENT PREDICTIONS → ALPHA SCORE + RANK
 # ══════════════════════════════════════════════════════════════
 def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
-                    macro, sector_map, tickers, yf_info=None, callback=None, config=None, as_of_date=None):
+                    macro, sector_map, tickers, yf_info=None, callback=None, config=None, as_of_date=None,
+                    macro_by_region=None):
     """Generate current alpha scores and ranks using the trained ensemble. as_of_date: use last price date when set for reproducibility."""
     if config is None:
         try:
@@ -808,7 +817,14 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     if ref_date is None:
         ref_date = datetime.now()
     if callback: callback("Generating alpha scores...")
-    df = build_features_asof(prices,fundamentals_db,macro,ref_date,tickers)
+    try:
+        from .data import get_region_for_ticker as _get_region_pred
+    except Exception:
+        _get_region_pred = None
+    df = build_features_asof(
+        prices, fundamentals_db, macro, ref_date, tickers,
+        macro_by_region=macro_by_region, get_region=_get_region_pred if macro_by_region else None,
+    )
     df = add_sector_interactions(df,sector_map)
     if yf_info:
         df["sector"] = df["ticker"].map(lambda t: yf_info.get(t,{}).get("sector","Unknown"))
@@ -1174,7 +1190,7 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
 # ══════════════════════════════════════════════════════════════
 # SIMPLE MODE (no FMP)
 # ══════════════════════════════════════════════════════════════
-def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores=None):
+def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores=None, macro_by_region=None):
     """Simple mode: technical + sentiment features, walk-forward with FORWARD returns (no FMP)."""
     try:
         from core.engine_config import get_model_settings
@@ -1187,6 +1203,15 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
     if callback:
         callback("Simple ensemble: technical + sentiment (forward targets)...")
     logger.info("train_simple: start (full universe=%d tickers)", len(yf_fundamentals))
+    try:
+        from .data import get_region_for_ticker
+    except Exception:
+        get_region_for_ticker = None
+    def _region_macro(ticker):
+        if macro_by_region and get_region_for_ticker:
+            region = get_region_for_ticker(ticker)
+            return macro_by_region.get(region) or macro_by_region.get("US") or macro
+        return macro
 
     if prices is None or not hasattr(prices, "index") or len(prices.index) == 0:
         logger.warning("train_simple: no price data available")
@@ -1263,9 +1288,10 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
                     row["news_sentiment"] = sentiment_scores.get(ticker, 0.0)
 
                 sec = fund.get("sector", "")
-                row["macro_fed"] = macro.get("fed_funds_rate", 4)
-                row["macro_oil"] = macro.get("oil_price", 80)
-                row["macro_vix"] = macro.get("vix", 22)
+                rm = _region_macro(ticker)
+                row["macro_fed"] = rm.get("policy_rate") or rm.get("fed_funds_rate", 4)
+                row["macro_oil"] = rm.get("oil_price", 80)
+                row["macro_vix"] = rm.get("vix", 22)
                 row["tech_x_rates"] = (1 if sec in ["Technology", "Communication Services"] else 0) * row["macro_fed"]
                 row["energy_x_oil"] = (1 if sec == "Energy" else 0) * row["macro_oil"]
                 if sentiment_scores:
@@ -1399,9 +1425,10 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
             if sentiment_scores:
                 row["news_sentiment"] = sentiment_scores.get(ticker, 0.0)
             sec = fund.get("sector", "")
-            row["macro_fed"] = macro.get("fed_funds_rate", 4)
-            row["macro_oil"] = macro.get("oil_price", 80)
-            row["macro_vix"] = macro.get("vix", 22)
+            rm = _region_macro(ticker)
+            row["macro_fed"] = rm.get("policy_rate") or rm.get("fed_funds_rate", 4)
+            row["macro_oil"] = rm.get("oil_price", 80)
+            row["macro_vix"] = rm.get("vix", 22)
             row["tech_x_rates"] = (1 if sec in ["Technology", "Communication Services"] else 0) * row["macro_fed"]
             row["energy_x_oil"] = (1 if sec == "Energy" else 0) * row["macro_oil"]
             if sentiment_scores:
@@ -1591,6 +1618,7 @@ def run_full_pipeline(callback=None):
     alldata = fetch_all_data(years=data_years, callback=callback)
     tickers = alldata["tickers"]; prices = alldata["prices"]
     yf_fund = alldata["fundamentals"]; macro = alldata["macro"]
+    macro_by_region = alldata.get("macro_by_region") or {}
     sentiment = alldata.get("sentiment",{})
     # Train on full universe. ISIN is used only for display (get_display_id) when available.
     sector_map = {t:f.get("sector","Unknown") for t,f in yf_fund.items()}
@@ -1633,7 +1661,7 @@ def run_full_pipeline(callback=None):
             fund_db = build_fundamentals_from_yfinance(prices, yf_fund, callback)
             used_yahoo_fallback = True
         if len(fund_db) < 30:
-            return _run_simple(prices, yf_fund, macro, sector_map, callback, sentiment, alldata.get("data_freshness"), simple_reason="too_few_fundamentals")
+            return _run_simple(prices, yf_fund, macro, sector_map, callback, sentiment, alldata.get("data_freshness"), simple_reason="too_few_fundamentals", macro_by_region=macro_by_region)
         horizons = config.get("horizons", [3, 6, 12, 24, 120])
         primary_H = config.get("primary_horizon", 12)
         ref_year = as_of_date.year if as_of_date else datetime.now().year
@@ -1647,7 +1675,8 @@ def run_full_pipeline(callback=None):
             # Calibration window matches horizon: 10Y horizon → 10 years of data
             start_year_H = ref_year - max(H // 12, 1)
             wf = walk_forward_train(prices,fund_db,macro,sector_map,list(fund_db.keys()),
-                                   start_year=start_year_H,horizon_months=H,callback=callback,config=config_h,as_of_date=as_of_date)
+                                   start_year=start_year_H,horizon_months=H,callback=callback,config=config_h,as_of_date=as_of_date,
+                                   macro_by_region=macro_by_region)
             if wf[0] is None:
                 if callback: callback(f"  {lbl}: insufficient data, skipping", (idx + 1) / total_h)
                 continue
@@ -1658,12 +1687,13 @@ def run_full_pipeline(callback=None):
                     final_models = {single_id: final_models[single_id]}
             results_h,blend = predict_current(final_models,medians,feat_cols,prices,fund_db,
                                             macro,sector_map,list(yf_fund.keys()),
-                                            yf_info=yf_fund,callback=callback,config=config_h,as_of_date=as_of_date)
+                                            yf_info=yf_fund,callback=callback,config=config_h,as_of_date=as_of_date,
+                                            macro_by_region=macro_by_region)
             if sentiment: results_h["news_sentiment"] = results_h["ticker"].map(sentiment).fillna(0)
             all_horizon_results[H] = {"results": results_h,"feat_imp": feat_imp,"oos_metrics": oos_metrics,"blend": blend}
             if callback: callback(f"  {lbl} done: IC={oos_metrics.get('spearman_rank_corr','?')} | {len(results_h)} stocks", (idx + 1) / total_h)
         if not all_horizon_results:
-            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="all_horizons_failed")
+            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="all_horizons_failed", macro_by_region=macro_by_region)
         primary = all_horizon_results.get(primary_H) or next(iter(all_horizon_results.values()))
         results = primary["results"]
         feat_imp = primary["feat_imp"]
@@ -1683,7 +1713,7 @@ def run_full_pipeline(callback=None):
         _store_model_state(None, None, None, prices, fund_db, sector_map, yf_fund)
     else:
         if callback: callback("Simple mode (no FMP key)")
-        return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="no_fmp_key")
+        return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="no_fmp_key", macro_by_region=macro_by_region)
     data_freshness = alldata.get("data_freshness")
     if data_freshness:
         model_info["data_freshness"] = data_freshness
@@ -1701,8 +1731,8 @@ def run_full_pipeline(callback=None):
     _save_cache(results,feat_imp,model_info,macro,all_horizons=all_horizon_results)
     return results,feat_imp,model_info,macro,all_horizon_results
 
-def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,data_freshness=None, simple_reason=None):
-    r = train_simple(prices,yf_fund,macro,callback,sentiment)
+def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,data_freshness=None, simple_reason=None, macro_by_region=None):
+    r = train_simple(prices,yf_fund,macro,callback,sentiment,macro_by_region=macro_by_region)
     if r[0] is None: return None,None,{"error":"Training failed"},macro,None
     ensemble,med,fc,results,feat_imp,oos = r
     oos["prediction_horizon_months"] = 12

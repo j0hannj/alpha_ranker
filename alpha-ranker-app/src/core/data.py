@@ -1217,7 +1217,77 @@ def fetch_ratios(ticker, api_key=None):
             logger.warning("fetch_fmp_quarterly: request failed for %s: %s", ticker, e)
     return results
 
-# ── MACRO (FRED) ──────────────────────────────────────────────
+# ── MACRO (FRED) — multi-région (pas seulement US) ─────────────
+# Ticker suffix → pays
+COUNTRY_FROM_SUFFIX = {
+    "": "US",
+    ".L": "UK", ".DE": "DE", ".PA": "FR", ".AS": "NL", ".SW": "CH", ".MC": "ES",
+    ".MI": "IT", ".LS": "PT", ".VI": "AT", ".OL": "NO", ".ST": "SE", ".HE": "FI",
+    ".CO": "DK", ".IR": "IE", ".WA": "PL", ".T": "JP", ".AX": "AU", ".HK": "HK",
+    ".SI": "SG", ".NZ": "NZ", ".TW": "TW", ".KS": "KR", ".TA": "IL", ".SA": "BR",
+    ".MX": "MX", ".BO": "IN", ".NS": "IN", ".JO": "ZA", ".SR": "SA", ".BK": "TH",
+    ".JK": "ID", ".IS": "TR", ".TO": "CA",
+}
+
+
+def get_country(ticker):
+    """Infer country from ticker suffix (e.g. AAPL→US, SAP.DE→DE)."""
+    for suffix, country in sorted(COUNTRY_FROM_SUFFIX.items(), key=lambda x: -len(x[0])):
+        if suffix and ticker.endswith(suffix):
+            return country
+    return "US"
+
+
+# Pays → région macro (une série FRED par région pour taux directeurs)
+COUNTRY_TO_MACRO_REGION = {
+    "US": "US", "CA": "CA",
+    "DE": "EUR", "FR": "EUR", "NL": "EUR", "BE": "EUR", "ES": "EUR",
+    "IT": "EUR", "PT": "EUR", "AT": "EUR", "FI": "EUR", "IE": "EUR",
+    "UK": "UK", "CH": "CH", "SE": "SE", "NO": "NO", "DK": "DK", "PL": "PL",
+    "JP": "JP", "AU": "AU", "HK": "HK", "SG": "SG", "NZ": "NZ",
+    "KR": "KR", "TW": "TW", "IL": "IL", "BR": "BR", "MX": "MX",
+    "IN": "IN", "ZA": "ZA", "TR": "TR", "SA": "SA", "TH": "TH", "ID": "ID",
+}
+
+# FRED: policy_rate, yield_10y, yield_2y, credit_spread par région (séries internationales)
+MACRO_SERIES_BY_REGION = {
+    "US": {"policy_rate": "FEDFUNDS", "yield_10y": "DGS10", "yield_2y": "DGS2", "credit_spread": "BAA10Y"},
+    "EUR": {"policy_rate": "ECBDFR", "yield_10y": "IRLTLT01EZM156N", "yield_2y": "IRSTCI01EZM156N"},
+    "UK": {"policy_rate": "IUDSOIA", "yield_10y": "IRLTLT01GBM156N", "yield_2y": "IRSTCI01GBM156N"},
+    "JP": {"policy_rate": "IRSTCB01JPM156N", "yield_10y": "IRLTLT01JPM156N", "yield_2y": "IRSTCI01JPM156N"},
+    "CA": {"policy_rate": "IRSTCB01CAM156N", "yield_10y": "IRLTLT01CAM156N"},
+    "AU": {"policy_rate": "IRSTCB01AUM156N", "yield_10y": "IRLTLT01AUM156N"},
+    "CH": {"policy_rate": "IRSTCB01CHM156N"},
+    "SE": {"policy_rate": "IRSTCB01SEM156N"},
+    "KR": {"policy_rate": "IRSTCB01KRM156N"},
+    "BR": {"policy_rate": "IRSTCB01BRM156N"},
+    "IN": {"policy_rate": "IRSTCB01INM156N"},
+    "MX": {"policy_rate": "IRSTCB01MXM156N"},
+    "ZA": {"policy_rate": "IRSTCB01ZAM156N"},
+    "TR": {"policy_rate": "IRSTCB01TRM156N"},
+}
+# Série globales (même valeur pour toutes les régions)
+GLOBAL_MACRO_SERIES = {"vix": "VIXCLS", "oil_price": "DCOILWTICO"}
+
+# Valeurs par défaut par région (si FRED indisponible)
+MACRO_DEFAULTS_BY_REGION = {
+    "US": {"policy_rate": 4.5, "yield_10y": 4.1, "yield_2y": 4.5, "vix": 22, "oil_price": 80, "credit_spread": 1.5},
+    "EUR": {"policy_rate": 2.65, "yield_10y": 2.5, "yield_2y": 2.4, "vix": 22, "oil_price": 80, "credit_spread": 1.2},
+    "UK": {"policy_rate": 4.5, "yield_10y": 4.3, "yield_2y": 4.2, "vix": 22, "oil_price": 80, "credit_spread": 1.3},
+    "JP": {"policy_rate": 0.5, "yield_10y": 1.2, "yield_2y": 0.8, "vix": 22, "oil_price": 80, "credit_spread": 0.8},
+    "CA": {"policy_rate": 4.0, "yield_10y": 3.5, "vix": 22, "oil_price": 80},
+    "AU": {"policy_rate": 4.35, "yield_10y": 4.2, "vix": 22, "oil_price": 80},
+    "CH": {"policy_rate": 0.5, "yield_10y": 0.6, "vix": 22, "oil_price": 80},
+    "SE": {"policy_rate": 3.0, "yield_10y": 2.2, "vix": 22, "oil_price": 80},
+    "KR": {"policy_rate": 2.75, "yield_10y": 3.2, "vix": 22, "oil_price": 80},
+    "BR": {"policy_rate": 13.25, "yield_10y": 14.0, "vix": 22, "oil_price": 80},
+    "IN": {"policy_rate": 6.5, "yield_10y": 7.1, "vix": 22, "oil_price": 80},
+    "MX": {"policy_rate": 11.0, "yield_10y": 9.0, "vix": 22, "oil_price": 80},
+    "ZA": {"policy_rate": 8.25, "yield_10y": 12.0, "vix": 22, "oil_price": 80},
+    "TR": {"policy_rate": 45.0, "yield_10y": 25.0, "vix": 22, "oil_price": 80},
+}
+
+
 def _macro_row_to_db(macro_dict, source="FRED"):
     """Build one row for table macro from a macro dict (date + series)."""
     date_val = macro_dict.get("date") or datetime.now().strftime("%Y-%m-%d")
@@ -1313,6 +1383,120 @@ def fetch_macro(callback=None):
         except Exception as ex:
             logger.warning("fetch_macro: upsert_macro (fallback) failed: %s", ex)
         return fallback
+
+
+def fetch_macro_by_region(callback=None):
+    """
+    Fetch macro indicators par région (US, EUR, UK, JP, ...) depuis FRED.
+    Persiste dans macro (US) et macro_by_region (toutes les régions).
+    Returns: (macro_us, macro_by_region).
+    macro_us: dict flat pour compat (fed_funds_rate, us_10y_yield, vix, oil_price, ...).
+    macro_by_region: dict region -> { policy_rate, yield_10y, yield_2y, yield_curve_slope, oil_price, vix, credit_spread }.
+    """
+    from . import portfolio as _pf
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    end = datetime.now()
+    start = end - timedelta(days=365)
+
+    # Global (VIX, pétrole) — une seule valeur pour tout le monde
+    global_vals = {}
+    api_key = os.environ.get("FRED_API_KEY")
+    if api_key:
+        try:
+            from fredapi import Fred
+            fred = Fred(api_key=api_key)
+            for name, sid in GLOBAL_MACRO_SERIES.items():
+                try:
+                    s = fred.get_series(sid, start, end)
+                    if len(s) > 0:
+                        global_vals[name] = round(float(s.dropna().iloc[-1]), 2)
+                except Exception as e:
+                    logger.debug("fetch_macro_by_region: global %s failed: %s", sid, e)
+        except Exception as e:
+            logger.warning("fetch_macro_by_region: FRED init failed: %s", e)
+    if "vix" not in global_vals:
+        global_vals["vix"] = 22
+    if "oil_price" not in global_vals:
+        global_vals["oil_price"] = 80
+
+    regions_to_fetch = list(MACRO_SERIES_BY_REGION.keys())
+    if callback:
+        callback("Macro: fetching by region (US, EUR, UK, JP, ...)...")
+
+    macro_by_region = {}
+    db_rows = []
+
+    for region in regions_to_fetch:
+        series_ids = MACRO_SERIES_BY_REGION.get(region, {})
+        defaults = MACRO_DEFAULTS_BY_REGION.get(region, MACRO_DEFAULTS_BY_REGION["US"])
+        out = {"policy_rate": defaults.get("policy_rate"), "yield_10y": defaults.get("yield_10y"),
+               "yield_2y": defaults.get("yield_2y"), "oil_price": global_vals.get("oil_price", 80),
+               "vix": global_vals.get("vix", 22), "credit_spread": defaults.get("credit_spread")}
+
+        if api_key:
+            try:
+                from fredapi import Fred
+                fred = Fred(api_key=api_key)
+                for key, sid in series_ids.items():
+                    try:
+                        s = fred.get_series(sid, start, end)
+                        if len(s) > 0:
+                            out[key] = round(float(s.dropna().iloc[-1]), 2)
+                    except Exception as e:
+                        logger.debug("fetch_macro_by_region: %s %s failed: %s", region, sid, e)
+            except Exception:
+                pass
+
+        if out.get("yield_10y") is not None and out.get("yield_2y") is not None:
+            out["yield_curve_slope"] = round(out["yield_10y"] - out["yield_2y"], 2)
+        else:
+            out["yield_curve_slope"] = defaults.get("yield_curve_slope")
+
+        macro_by_region[region] = out
+        db_rows.append({
+            "date": date_str,
+            "region": region,
+            "policy_rate": out.get("policy_rate"),
+            "yield_10y": out.get("yield_10y"),
+            "yield_2y": out.get("yield_2y"),
+            "yield_curve_slope": out.get("yield_curve_slope"),
+            "oil_price": out.get("oil_price"),
+            "vix": out.get("vix"),
+            "credit_spread": out.get("credit_spread"),
+            "source": "FRED" if api_key else "fallback",
+        })
+
+    try:
+        _pf.upsert_macro_by_region(db_rows)
+    except Exception as e:
+        logger.warning("fetch_macro_by_region: upsert_macro_by_region failed: %s", e)
+
+    # Legacy: table macro (US seulement) + dict flat pour compat
+    us = macro_by_region.get("US", {})
+    macro_us = {
+        "date": date_str,
+        "fed_funds_rate": us.get("policy_rate"),
+        "us_10y_yield": us.get("yield_10y"),
+        "us_2y_yield": us.get("yield_2y"),
+        "yield_curve_slope": us.get("yield_curve_slope"),
+        "oil_price": global_vals.get("oil_price", 80),
+        "vix": global_vals.get("vix", 22),
+        "credit_spread": us.get("credit_spread"),
+    }
+    try:
+        _pf.upsert_macro([_macro_row_to_db(macro_us, source="FRED" if api_key else "fallback")])
+    except Exception as e:
+        logger.warning("fetch_macro_by_region: upsert_macro (US) failed: %s", e)
+
+    if callback:
+        callback("Macro: %d regions stored" % len(macro_by_region))
+    return macro_us, macro_by_region
+
+
+def get_region_for_ticker(ticker):
+    """Région macro pour un ticker (ex: AAPL→US, SAP.DE→EUR)."""
+    country = get_country(ticker)
+    return COUNTRY_TO_MACRO_REGION.get(country, "US")
 
 # ── FX (exchangerate.host + yfinance fallback) ────────────────
 def fetch_fx(base="EUR", targets=None, callback=None):
@@ -1458,8 +1642,14 @@ def fetch_all_data(tickers=None, years=5, callback=None):
     except Exception as e:
         logger.warning("fetch_all_data: upsert_prices failed: %s", e)
 
-    if callback: callback("Data: macro...")
-    macro = fetch_macro(callback=callback)
+    if callback:
+        callback("Data: macro...")
+    try:
+        macro, macro_by_region = fetch_macro_by_region(callback=callback)
+    except Exception as e:
+        logger.warning("fetch_all_data: fetch_macro_by_region failed, using fetch_macro: %s", e)
+        macro = fetch_macro(callback=callback)
+        macro_by_region = {}
 
     if callback: callback("Data: FX...")
     fx = fetch_fx(callback=callback)
@@ -1493,6 +1683,7 @@ def fetch_all_data(tickers=None, years=5, callback=None):
         "prices": prices,
         "fundamentals": fundamentals,
         "macro": macro,
+        "macro_by_region": macro_by_region,
         "fx": fx,
         "sentiment": sentiment,
         "fetched_at": now_iso,

@@ -171,6 +171,19 @@ def _conn():
         credit_spread     REAL,
         source            TEXT
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS macro_by_region (
+        date              TEXT NOT NULL,
+        region            TEXT NOT NULL,
+        policy_rate       REAL,
+        yield_10y         REAL,
+        yield_2y          REAL,
+        yield_curve_slope REAL,
+        oil_price         REAL,
+        vix               REAL,
+        credit_spread     REAL,
+        source            TEXT,
+        PRIMARY KEY (date, region)
+    )""")
     c.commit()
     return c
 
@@ -434,6 +447,65 @@ def load_macro_series():
         cur = c.execute("SELECT * FROM macro ORDER BY date")
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        c.close()
+
+
+def upsert_macro_by_region(rows):
+    """
+    Insert macro rows per region. rows: iterable of dicts with date, region, policy_rate, yield_10y, ...
+    Append-only: INSERT OR IGNORE on (date, region).
+    """
+    if not rows:
+        return
+    c = _conn()
+    try:
+        c.executemany(
+            """
+            INSERT OR IGNORE INTO macro_by_region
+            (date, region, policy_rate, yield_10y, yield_2y, yield_curve_slope,
+             oil_price, vix, credit_spread, source)
+            VALUES
+            (:date, :region, :policy_rate, :yield_10y, :yield_2y, :yield_curve_slope,
+             :oil_price, :vix, :credit_spread, :source)
+            """,
+            rows,
+        )
+        c.commit()
+    finally:
+        c.close()
+
+
+def load_macro_by_region_latest(date=None):
+    """
+    Return macro by region for the latest date (or given date).
+    Returns dict: region -> { policy_rate, yield_10y, oil_price, vix, ... }.
+    """
+    c = _conn()
+    try:
+        if date:
+            cur = c.execute(
+                "SELECT * FROM macro_by_region WHERE date = ? ORDER BY region",
+                (date,),
+            )
+        else:
+            latest = c.execute("SELECT MAX(date) FROM macro_by_region").fetchone()[0]
+            if not latest:
+                return {}
+            cur = c.execute(
+                "SELECT * FROM macro_by_region WHERE date = ? ORDER BY region",
+                (latest,),
+            )
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        out = {}
+        for row in rows:
+            d = dict(zip(cols, row))
+            region = d.pop("region", None)
+            d.pop("date", None)
+            if region:
+                out[region] = d
+        return out
     finally:
         c.close()
 

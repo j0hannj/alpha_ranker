@@ -8,7 +8,7 @@ and backtest engines.
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -40,8 +40,17 @@ def get_fundamentals_asof(ticker_data: List[dict], as_of_date) -> Optional[dict]
     return {**latest, **ttm}
 
 
-def build_features_asof(prices, fundamentals_db: Dict[str, List[dict]], macro: Dict, as_of_date, tickers: Iterable[str]) -> pd.DataFrame:
-    """Build feature matrix using ONLY data available at as_of_date."""
+def build_features_asof(
+    prices,
+    fundamentals_db: Dict[str, List[dict]],
+    macro: Dict,
+    as_of_date,
+    tickers: Iterable[str],
+    macro_by_region: Optional[Dict[str, Dict]] = None,
+    get_region: Optional[Callable[[str], str]] = None,
+) -> pd.DataFrame:
+    """Build feature matrix using ONLY data available at as_of_date.
+    If macro_by_region and get_region are provided, macro features use the ticker's region (non-US)."""
     as_of = pd.Timestamp(as_of_date)
     records: List[dict] = []
     for ticker in tickers:
@@ -110,8 +119,24 @@ def build_features_asof(prices, fundamentals_db: Dict[str, List[dict]], macro: D
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning("build_features_asof: price/technical feature failed for %s: %s", ticker, e)
-        # Macro features (contemporaneous)
-        if isinstance(macro, dict):
+        # Macro features: par région si macro_by_region + get_region, sinon macro global (US)
+        if macro_by_region and get_region is not None:
+            region = get_region(ticker)
+            region_macro = (macro_by_region.get(region) or macro_by_region.get("US") or macro) if isinstance(macro_by_region, dict) else macro
+            if isinstance(region_macro, dict):
+                effective = {
+                    "fed_funds_rate": region_macro.get("policy_rate"),
+                    "us_10y_yield": region_macro.get("yield_10y"),
+                    "us_2y_yield": region_macro.get("yield_2y"),
+                    "yield_curve_slope": region_macro.get("yield_curve_slope"),
+                    "oil_price": region_macro.get("oil_price"),
+                    "vix": region_macro.get("vix"),
+                    "credit_spread": region_macro.get("credit_spread"),
+                }
+                for k, v in effective.items():
+                    if v is not None and isinstance(v, (int, float)):
+                        row[f"macro_{k}"] = v
+        elif isinstance(macro, dict):
             for k, v in macro.items():
                 if isinstance(v, (int, float)):
                     row[f"macro_{k}"] = v
