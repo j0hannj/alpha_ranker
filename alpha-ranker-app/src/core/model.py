@@ -51,7 +51,7 @@ try:
         FeatureDecorrelator,
         SectorNeutralizer,
     )
-except Exception:
+except ImportError:
     # Fallback when core is imported without package context
     from features.fundamental_features import get_fundamentals_asof, build_features_asof
     from features.price_features import compute_forward_return
@@ -68,7 +68,8 @@ except Exception:
     )
 
 logger = logging.getLogger(__name__)
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*LightGBM.*")
 CACHE_DIR = Path(__file__).parent.parent.parent / "db"
 CACHE_DIR.mkdir(exist_ok=True)
 MODEL_CACHE = CACHE_DIR / "model_cache.pkl"
@@ -627,8 +628,13 @@ def _get_models(config=None):
                 self._model.fit(X, y)
                 return self
             def predict(self, X): return self._model.predict(X) if self._model else np.zeros(len(X))
-        all_models["TCN"] = _LazyTCN(dl_device)
-        all_models["LSTM"] = _LazyLSTM(dl_device)
+        # NOTE: TCN/LSTM require sequential input (multiple timesteps per sample)
+        # to be useful. Current pipeline feeds flat cross-sectional features
+        # reshaped to seq_len=1, so these models add noise without value.
+        # Enable only if input is restructured to include temporal sequences.
+        if config.get("enable_deep_learning_models", False):
+            all_models["TCN"] = _LazyTCN(dl_device)
+            all_models["LSTM"] = _LazyLSTM(dl_device)
     if config:
         enabled = config.get("enabled_models") or list(all_models.keys())
         return {k: v for k, v in all_models.items() if k in enabled}
@@ -762,11 +768,12 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
     ensemble_method = config.get("ensemble_method") or "ic_weighted_average"
     winsorize = config.get("winsorization", False)
     winsorize_q = config.get("winsorize_quantile", 0.02)
-    min_trn = 50
-    min_tst = 10
+    min_trn = max(100, len(feat_cols) * 3)
+    min_tst = 15
     n_periods = len(period_indices)
     if n_periods <= 4:
-        min_trn, min_tst = 20, 5
+        min_trn = max(50, len(feat_cols) * 2)
+        min_tst = 10
     for i,tp in enumerate(period_indices):
         if i<min_train: continue
         trn = full_df[full_df["period_idx"].isin(period_indices[:i])]
@@ -812,7 +819,14 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
             except Exception as e:
                 logger.debug("walk_forward_train OOS: %s failed: %s", name, e)
                 per_model_oos.setdefault(name, []).append(0)
-        ens = {n: {"model": m, "ic": np.mean(per_model_oos.get(n,[])) or 0.01} for n, m in models.items()}
+        # IC-Information-Ratio weighted: penalize inconsistent models
+        ens = {}
+        for n, m in models.items():
+            ics = per_model_oos.get(n, [])
+            mean_ic = np.mean(ics) if ics else 0.01
+            std_ic = np.std(ics) if len(ics) > 1 else 1.0
+            icir = mean_ic / std_ic if std_ic > 0 else mean_ic
+            ens[n] = {"model": m, "ic": max(icir, 0.01)}
         ep,_ = predict_ensemble(ens,Xte_r, method=ensemble_method if isinstance(ensemble_method, str) else "ic_weighted_average")
         for j,(idx,row) in enumerate(tst.iterrows()):
             oos_preds.append({"ticker":row["ticker"],"period":int(tp),"predicted":ep[j],"actual":row["forward_return"]})
@@ -886,9 +900,13 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
     for name,m in _get_models(config).items():
         try:
             m.fit(X_all,y_all)
-            final_models[name] = {"model":m,
-                "ic":np.mean(per_model_oos.get(name,[])) or 0.01,
-                "cv_r2":np.mean(per_model_oos.get(name,[])) or 0}
+            ics = per_model_oos.get(name, [])
+            mean_ic = np.mean(ics) if ics else 0.01
+            std_ic = np.std(ics) if len(ics) > 1 else 1.0
+            icir = mean_ic / (std_ic + 1e-6) if std_ic >= 0 else mean_ic
+            final_models[name] = {"model": m,
+                "ic": max(icir, 0.01),
+                "cv_r2": np.mean(ics) or 0}
             if callback: callback(f"  {name}: trained, OOS IC={final_models[name]['ic']:.4f}")
         except Exception as e:
             logger.warning("walk_forward final fit: %s failed: %s", name, e)
@@ -1099,13 +1117,17 @@ def explain_prediction(ticker, models_dict, medians, feat_cols, prices,
                 except Exception as e:
                     logger.debug("explain_prediction: Ridge contrib for %s: %s", name, e)
 
-            # RandomForest: use feature_importances × signed deviation as proxy
+            # RandomForest: use feature_importances × signed deviation as proxy (approximate)
             elif hasattr(m, "feature_importances_"):
                 try:
-                    # Approximate: importance × (value - 0.5) for ranked features
                     imp = m.feature_importances_
                     vals = X_ranked.iloc[0].values
                     contribs = imp * (vals - 0.5) * 2  # Scale to meaningful range
+                    model_exp["approximation"] = True
+                    model_exp["approximation_note"] = (
+                        "RF contributions are approximate (importance × deviation). "
+                        "Use LightGBM/XGBoost SHAP values for reliable explanations."
+                    )
                 except Exception as e:
                     logger.debug("explain_prediction: RandomForest contrib for %s: %s", name, e)
 
@@ -1751,7 +1773,9 @@ def run_full_pipeline(callback=None):
         max_history = int(get_data_settings().get("data_max_history_years", 15))
     except Exception:
         max_history = 15
-    data_years = min(max(training_window_years, max(horizons_cfg) // 12 if horizons_cfg else 5), max_history)
+    min_wf_years = max(int(config.get("training_window_years", 3)), 3)
+    max_horizon_years = max(horizons_cfg) // 12 if horizons_cfg else 5
+    data_years = min(max_horizon_years + min_wf_years + 1, max_history)
     if callback: callback(f"Loading up to {data_years}y data (max {max_history}y) for horizons {horizons_cfg}...")
     alldata = fetch_all_data(years=data_years, callback=callback)
     tickers = alldata["tickers"]; prices = alldata["prices"]
@@ -1817,8 +1841,8 @@ def run_full_pipeline(callback=None):
             if callback:
                 callback(f"Training {lbl} horizon ({idx+1}/{total_h})...", (idx + 0.1) / total_h)
             config_h = {**config, "prediction_horizon_months": H}
-            # Calibration window matches horizon: 10Y horizon → 10 years of data
-            start_year_H = ref_year - max(H // 12, 1)
+            # Ensure enough history BEFORE cutoff for walk-forward folds (need min_wf_years of quarterly rebal dates)
+            start_year_H = ref_year - max(H // 12, 1) - min_wf_years
             wf = walk_forward_train(prices,fund_db,macro_df,sector_map,list(fund_db.keys()),
                                    start_year=start_year_H,horizon_months=H,callback=callback,config=config_h,as_of_date=as_of_date,
                                    macro_by_region=macro_by_region)
