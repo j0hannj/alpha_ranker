@@ -10,6 +10,7 @@ Sources:
   - FRED → macro indicators
   - exchangerate.host → FX rates
 """
+import calendar
 import os, json, urllib.request
 import numpy as np
 import pandas as pd
