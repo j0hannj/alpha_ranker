@@ -845,7 +845,17 @@ class AlphaRanker(ctk.CTk):
             stab=r.get("movement_classification")
             if stab is None or (isinstance(stab,float) and stab!=stab): stab="—"
             else: stab=str(stab)[:14]
-            self.rk_tree.insert("","end",values=(int(r["rank"]),get_display_id(r["ticker"],imap),r["ticker"],r.get("name","")[:18],
+            name_disp = (r.get("name") or "")[:18]
+            try:
+                da = r.get("discovered_at")
+                if da:
+                    from datetime import datetime as dt
+                    d = dt.fromisoformat(str(da).replace("Z",""))
+                    if (dt.now() - d).days < 7:
+                        name_disp = ((r.get("name") or "")[:14] + " NEW") if len((r.get("name") or "")) > 14 else ((r.get("name") or "") + " NEW")
+            except Exception:
+                pass
+            self.rk_tree.insert("","end",values=(int(r["rank"]),get_display_id(r["ticker"],imap),r["ticker"],name_disp,
                 r.get("sector","")[:14],ch_disp,stab,rd,conv,an,sn,pe,gr,fcf,mom),tags=(tag,))
 
     def _rk_tooltip_text(self, row_series, col_name):

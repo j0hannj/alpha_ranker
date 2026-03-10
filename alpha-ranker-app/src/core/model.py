@@ -1260,6 +1260,11 @@ def run_full_pipeline(callback=None):
     data_freshness = alldata.get("data_freshness")
     if data_freshness:
         model_info["data_freshness"] = data_freshness
+    # Expose discovered_at for UI "NEW" badge (recent discoveries)
+    if not results.empty and "ticker" in results.columns and alldata.get("fundamentals"):
+        results["discovered_at"] = results["ticker"].map(
+            lambda t: alldata["fundamentals"].get(t, {}).get("discovered_at")
+        )
     # Persist ranking snapshot for stability (before cache so next run can compare)
     try:
         from core import portfolio
