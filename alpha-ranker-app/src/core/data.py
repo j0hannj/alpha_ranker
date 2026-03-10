@@ -44,75 +44,212 @@ def _get_data_config():
         return 2011, 15, 2500
 
 
-# ── UNIVERSE (tous les equity disponibles, pas de liste fixe) ─────────────
-def get_universe_tickers(callback=None):
+# ── UNIVERSE (FMP screener + yfinance fallback, aucun scrape Wikipedia) ────
+UNIVERSE_CACHE = CACHE_DIR / "universe_cache.json"
+
+
+def _fetch_universe_fmp(api_key, callback=None):
     """
-    Tous les symboles equity disponibles sur le marché. Pas de liste fixe.
-    Avec FMP: appel API stock/list → tous les titres type "stock" (milliers).
-    Sans FMP: fallback indices Wikipedia (S&P, Nasdaq, Russell). Liste minimale
-    uniquement si tout échoue (< 50 symboles).
+    FMP stock screener → 1000–2000+ global equities.
+    Primary source when FMP_API_KEY is configured.
+    Exchanges, min market cap and limit come from universe_settings (no hardcoded lists).
+    Returns (tickers, fundamentals_dict).
     """
-    _, _, min_tickers = _get_data_config()
-    tickers = []
-    fmp_key = os.environ.get("FMP_API_KEY")
-    if fmp_key:
+    try:
+        from .engine_config import get_universe_settings
+        uv = get_universe_settings()
+    except Exception:
+        uv = {}
+    exchange_list = uv.get("fmp_exchanges") or []
+    min_cap = uv.get("fmp_min_market_cap") or 500_000_000
+    limit = uv.get("fmp_screener_limit") or 2000
+
+    tickers: list[str] = []
+    fundamentals: dict[str, dict] = {}
+
+    for exchange_str in exchange_list:
+        label = exchange_str.split(",")[0] if exchange_str else "?"
         try:
-            url = f"https://financialmodelingprep.com/api/v3/stock/list?apikey={fmp_key}"
-            with urllib.request.urlopen(url, timeout=60) as r:
+            if callback:
+                callback(f"FMP screener: {label}...")
+            url = (
+                "https://financialmodelingprep.com/api/v3/stock-screener"
+                f"?marketCapMoreThan={int(min_cap)}"
+                f"&isActivelyTrading=true"
+                f"&exchange={exchange_str}"
+                f"&limit={int(limit)}"
+                f"&apikey={api_key}"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
                 data = json.loads(r.read().decode())
-            for item in (data or []):
-                if (item.get("type") or "").lower() != "stock":
-                    continue
-                sym = (item.get("symbol") or "").strip()
+
+            count = 0
+            today = datetime.now().strftime("%Y-%m-%d")
+            for item in data or []:
+                sym = item.get("symbol")
                 if not sym:
                     continue
-                if "." in sym:
-                    sym = sym.replace(".", "-")
                 tickers.append(sym)
-            tickers = list(dict.fromkeys(tickers))
+                count += 1
+                fundamentals[sym] = {
+                    "date": today,
+                    "marketCap": item.get("marketCap") or item.get("mktCap"),
+                    "sector": item.get("sector"),
+                    "industry": item.get("industry"),
+                    "shortName": item.get("companyName"),
+                    "currentPrice": item.get("price"),
+                    "beta": item.get("beta"),
+                    "trailingPE": item.get("peRatio") if item.get("peRatio") else None,
+                    "forwardPE": item.get("peRatio"),
+                    "dividendYield": item.get("lastAnnualDividend"),
+                    "volume": item.get("volume"),
+                    "exchange": item.get("exchangeShortName"),
+                    "country": item.get("country"),
+                }
             if callback:
-                callback(f"Data: univers FMP — {len(tickers)} equity (tous disponibles, pas de liste fixe)")
-            if tickers:
-                return tickers
-        except Exception:
-            pass
+                callback(f"  {label}: {count} stocks")
+        except Exception as e:
+            logger.warning("FMP screener %s failed: %s", exchange_str, e)
+            if callback:
+                callback(f"  {label} ERROR: {e}")
+
+    tickers = sorted(set(tickers))
+    return tickers, fundamentals
+
+
+def _fetch_universe_yfinance(callback=None):
+    """
+    Fallback universe construction when no FMP key is available.
+    ETF list and search queries come from universe_settings (no hardcoded lists in code).
+    Returns (tickers, fundamentals_dict).
+    """
+    import yfinance as yf
+
+    try:
+        from .engine_config import get_universe_settings
+        uv = get_universe_settings()
+    except Exception:
+        uv = {}
+    etf_list = uv.get("yf_etf_tickers") or []
+    search_list = uv.get("yf_search_queries") or []
+
+    tickers: set[str] = set()
+    fundamentals: dict[str, dict] = {}
+
+    for etf in etf_list:
+        try:
+            if callback:
+                callback(f"Scanning {etf} holdings...")
+            t = yf.Ticker(etf)
+            holdings = None
+            try:
+                # Modern yfinance exposes funds_data.top_holdings for ETFs
+                holdings = getattr(getattr(t, "funds_data", None), "top_holdings", None)
+            except Exception as e:
+                logger.debug("yfinance holdings for %s failed: %s", etf, e)
+            if holdings is not None and not holdings.empty:
+                syms = [s for s in holdings.index.tolist() if isinstance(s, str) and len(s) < 12]
+                tickers.update(syms)
+                if callback:
+                    callback(f"  {etf}: {len(syms)} holdings")
+        except Exception as e:
+            logger.warning("ETF %s holdings failed: %s", etf, e)
+            if callback:
+                callback(f"  {etf}: {e}")
+
+    for query in search_list:
+        try:
+            results = yf.Search(query)
+            quotes = getattr(results, "quotes", None)
+            if quotes:
+                if not isinstance(quotes, list):
+                    quotes = list(quotes)
+                for q in quotes[:30]:
+                    sym = q.get("symbol") if isinstance(q, dict) else getattr(q, "symbol", None)
+                    if sym and isinstance(sym, str):
+                        tickers.add(sym)
+        except Exception as e:
+            logger.warning("yfinance Search '%s' failed: %s", query, e)
+            if callback:
+                callback(f"  Search error: {e}")
+
+    # 3) Fundamentals via yfinance.info for the discovered universe
     if callback:
-        callback("Data: pas de clé FMP — fallback indices Wikipedia")
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-        tickers.extend(tables[0]["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist())
-    except Exception:
-        pass
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-        for t in tables:
-            if "Ticker" in t.columns:
-                tickers.extend(t["Ticker"].astype(str).str.replace(".", "-", regex=False).tolist())
-                break
-            if "Symbol" in t.columns:
-                tickers.extend(t["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist())
-                break
-    except Exception:
-        pass
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/Russell_1000_Index")
-        for t in tables:
-            if "Ticker" in t.columns:
-                tickers.extend(t["Ticker"].astype(str).str.replace(".", "-", regex=False).tolist())
-                break
-            if "Symbol" in t.columns:
-                tickers.extend(t["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist())
-                break
-    except Exception:
-        pass
-    tickers = list(dict.fromkeys(tickers))
+        callback(f"Fetching info for {len(tickers)} stocks (yfinance)...")
+    today = datetime.now().strftime("%Y-%m-%d")
+    for t in list(tickers):
+        try:
+            info = yf.Ticker(t).info
+            if info and info.get("marketCap"):
+                keys = [
+                    "marketCap", "trailingPE", "forwardPE", "sector", "industry",
+                    "shortName", "currentPrice", "beta", "dividendYield",
+                    "targetMeanPrice", "recommendationKey", "numberOfAnalystOpinions",
+                ]
+                fundamentals[t] = {"date": today, **{k: info.get(k) for k in keys}}
+        except Exception as e:
+            logger.debug("yfinance info for %s failed: %s", t, e)
+
     if callback:
-        callback(f"Data: univers indices — {len(tickers)} symboles")
-    if len(tickers) < 50:
+        callback(f"Universe (yfinance): {len(tickers)} stocks")
+    return sorted(tickers), fundamentals
+
+
+def fetch_universe_cached(years=5, callback=None):
+    """
+    Cached universe (tickers + fundamentals), refreshed at most every 24h.
+    Primary source: FMP screener. Secondary: yfinance.
+    """
+    if UNIVERSE_CACHE.exists():
+        try:
+            cache = json.loads(UNIVERSE_CACHE.read_text(encoding="utf-8"))
+            date_str = cache.get("date")
+            cached_tickers = cache.get("tickers") or []
+            cached_fund = cache.get("fundamentals") or {}
+            if date_str:
+                age_sec = (datetime.now() - datetime.fromisoformat(date_str)).total_seconds()
+            else:
+                age_sec = 1e9
+            if age_sec < 86400 and len(cached_tickers) > 100:
+                if callback:
+                    callback(
+                        f"Universe cache: {len(cached_tickers)} stocks "
+                        f"({int(age_sec // 3600)}h old)"
+                    )
+                return cached_tickers, cached_fund
+        except Exception as e:
+            logger.warning("Universe cache read failed: %s", e)
+            if callback:
+                callback(f"Cache error: {e}")
+
+    api_key = os.environ.get("FMP_API_KEY")
+    if api_key:
+        tickers, fundamentals = _fetch_universe_fmp(api_key, callback)
+    else:
         if callback:
-            callback("Data: liste minimale (fallback, pas de FMP)")
-        tickers = ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","BRK-B","JPM","V","UNH","XOM","JNJ","WMT","PG","MA","HD","CVX","MRK","ABBV","LLY","PEP","KO","COST","AVGO","TMO","MCD","ACN","CSCO","ABT","NEE","TXN","RTX","LOW","HON","AMGN","IBM","CAT","BA","GS","BLK","SPGI","AXP","DE","ISRG","REGN","VRTX","GILD","SYK","BKNG","CB","PLD","CI","CME","SHW","FCX","COP","EOG","SLB","HAL","LMT","GD","NOC","CRWD","PANW","PLTR","NET","DDOG","RKLB","HII"]
-    return tickers
+            callback("No FMP_API_KEY — using yfinance-only universe")
+        tickers, fundamentals = _fetch_universe_yfinance(callback)
+
+    try:
+        UNIVERSE_CACHE.write_text(
+            json.dumps(
+                {
+                    "tickers": tickers,
+                    "fundamentals": fundamentals,
+                    "date": datetime.now().isoformat(),
+                    "source": "fmp" if api_key else "yfinance",
+                },
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning("Universe cache write failed: %s", e)
+        if callback:
+            callback(f"Cache write error: {e}")
+
+    return tickers, fundamentals
 
 
 def _dataframe_from_cache_dict(cached):
@@ -128,173 +265,33 @@ def _dataframe_from_cache_dict(cached):
 
 def fetch_universe(years=5, callback=None):
     """
-    Univers via get_universe_tickers (objectif 2500+). Prix mois par mois (cache et reprise par mois).
+    Build global equity universe.
+    PRIMARY source: FMP stock screener (requires FMP_API_KEY).
+    SECONDARY source: yfinance (no key, more limited).
+
+    For backward compatibility, returns (tickers, prices, fundamentals)
+    even though prices are now usually downloaded in fetch_all_data.
     """
     import yfinance as yf
-    from .api_cache import get as cache_get, set as cache_set
 
-    start_year, max_history_years, _ = _get_data_config()
-    now = datetime.now()
-    end_year, end_month = now.year, now.month
-    start_year = max(start_year, end_year - max_history_years + 1)
-    month_list = []
-    for y in range(start_year, end_year + 1):
-        m_start = 1 if y > start_year else 1
-        m_end = end_month if y == end_year else 12
-        for m in range(m_start, m_end + 1):
-            month_list.append((y, m))
-    if not month_list:
-        month_list = [(end_year, end_month)]
-
+    tickers, fundamentals = fetch_universe_cached(years=years, callback=callback)
     if callback:
-        try:
-            from .api_cache import get_cache_status
-            st = get_cache_status()
-            path_short = str(Path(st["path"]).parent.name) + "/" + Path(st["path"]).name
-            periods = st.get("prices_monthly_periods", [])
-            if isinstance(periods, list) and periods:
-                p_min = min(x.get("period", x) for x in periods)
-                p_max = max(x.get("period", x) for x in periods)
-                callback(f"Cache: {path_short} | {len(periods)} mois ({p_min}..{p_max})")
-            else:
-                n_tk = st.get("n_tickers")
-                tick_str = f" | {n_tk} tickers" if n_tk is not None else ""
-                callback(f"Cache: {path_short}{tick_str} | premier run (mois par mois)")
-        except Exception:
-            pass
+        callback(f"Universe: {len(tickers)} stocks")
 
-    # Liste stockée en DB = priorité : ce qui est en base reste même si l'API ne le renvoie plus
-    from .api_cache import get_stored_universe_list, set_stored_universe_list
-    stored = get_stored_universe_list()
-    fresh = get_universe_tickers(callback=callback)
-    tickers = list(set(stored) | set(fresh))
-    if not tickers:
-        tickers = fresh
-    set_stored_universe_list(tickers)
-    if callback and stored:
-        callback(f"Data: univers {len(tickers)} (dont {len(stored)} déjà en base, conservés)")
-    fmp_key = os.environ.get("FMP_API_KEY")
-    if fmp_key and tickers and callback:
-        try:
-            fetch_isins_fmp(tickers, fmp_key, callback=callback)
-        except Exception:
-            pass
-    fundamentals = {}
-    for i, t in enumerate(tickers):
-        cached_info = cache_get("yahoo_info", t, max_age_hours=24)
-        if cached_info and isinstance(cached_info, dict):
-            fundamentals[t] = cached_info
-        else:
-            try:
-                info = yf.Ticker(t).info
-                if info and info.get("marketCap"):
-                    fundamentals[t] = {
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                        **{k: info.get(k) for k in [
-                            "marketCap","trailingPE","forwardPE","pegRatio","priceToSalesTrailing12Months",
-                            "priceToBook","enterpriseToEbitda","enterpriseToRevenue","profitMargins",
-                            "operatingMargins","grossMargins","returnOnEquity","returnOnAssets",
-                            "revenueGrowth","earningsGrowth","earningsQuarterlyGrowth","debtToEquity",
-                            "currentRatio","quickRatio","freeCashflow","operatingCashflow","totalRevenue",
-                            "totalDebt","totalCash","dividendYield","payoutRatio","beta","shortRatio",
-                            "sharesOutstanding","heldPercentInstitutions","sector","industry","shortName",
-                            "currentPrice","targetMeanPrice","recommendationKey","numberOfAnalystOpinions"
-                        ]}
-                    }
-                    cache_set("yahoo_info", t, fundamentals[t])
-            except Exception:
-                pass
-        if callback and (i + 1) % 50 == 0:
-            callback(f"Data: {len(fundamentals)}/{len(tickers)} sauvegardés (reprise si arrêt)")
+    # Download prices for requested history window
+    end = datetime.now()
+    start = end - timedelta(days=years * 365)
     if callback:
-        callback(f"Data: {len(fundamentals)}/{len(tickers)} tickers sauvegardés")
+        callback(f"Downloading prices for {len(tickers)} stocks...")
+    prices = yf.download(
+        tickers,
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        group_by="ticker",
+        auto_adjust=True,
+        threads=True,
+    )
 
-    # Prix mois par mois: cache par mois. Si nouveaux tickers, on ne télécharge que les manquants puis fusion.
-    HOURS_20Y = 24 * 365 * 20
-    parts = []
-    for idx, (y, m) in enumerate(month_list):
-        is_current = (y == end_year and m == end_month)
-        max_age_h = 24 if is_current else HOURS_20Y
-        period_key = f"{y}-{m:02d}"
-        cached = cache_get("prices_monthly", period_key, max_age_hours=max_age_h)
-        df = None
-        start_date = f"{y}-{m:02d}-01"
-        last_day = calendar.monthrange(y, m)[1]
-        end_date = f"{y}-{m:02d}-{last_day:02d}"
-        if is_current:
-            end_date = now.strftime("%Y-%m-%d")
-        if cached is not None:
-            df = _dataframe_from_cache_dict(cached)
-            if df is not None and not df.empty:
-                try:
-                    cols = getattr(df, "columns", None)
-                    if cols is not None and len(cols) > 0 and isinstance(cols[0], tuple):
-                        tickers_in_cache = set(c[0] for c in cols if isinstance(c, tuple) and len(c) >= 2)
-                    elif hasattr(cols, "get_level_values"):
-                        tickers_in_cache = set(cols.get_level_values(0).unique())
-                    elif hasattr(cols, "levels") and cols.levels:
-                        tickers_in_cache = set(cols.levels[0])
-                    else:
-                        tickers_in_cache = set()
-                    missing = [t for t in tickers if t not in tickers_in_cache]
-                    if missing:
-                        if callback and (idx + 1) % 12 == 0:
-                            callback(f"Data: {period_key} ({idx+1}/{len(month_list)}) cache + {len(missing)} nouveaux")
-                        try:
-                            new_prices = yf.download(
-                                missing, start=start_date, end=end_date,
-                                group_by="ticker", auto_adjust=True, threads=True, progress=False
-                            )
-                            if not new_prices.empty and hasattr(new_prices, "columns") and len(new_prices.columns) > 0:
-                                df = pd.concat([df, new_prices], axis=1)
-                                try:
-                                    cache_set("prices_monthly", period_key, df.to_dict(orient="split"))
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                    elif callback and (idx + 1) % 12 == 0:
-                        callback(f"Data: {period_key} ({idx+1}/{len(month_list)}) cache")
-                except Exception:
-                    pass
-        if df is None or df.empty:
-            if callback and (idx + 1) % 12 == 1:
-                callback(f"Data: téléchargement {period_key} ({idx+1}/{len(month_list)})…")
-            try:
-                month_prices = yf.download(
-                    tickers, start=start_date, end=end_date,
-                    group_by="ticker", auto_adjust=True, threads=True, progress=False
-                )
-            except Exception:
-                month_prices = pd.DataFrame()
-            if not month_prices.empty and hasattr(month_prices, "columns") and len(month_prices.columns) > 0:
-                try:
-                    cache_set("prices_monthly", period_key, month_prices.to_dict(orient="split"))
-                except Exception:
-                    pass
-                if callback and (idx + 1) % 12 == 1:
-                    callback(f"Data: {period_key} sauvegardé ({idx+1}/{len(month_list)})")
-                parts.append(month_prices)
-        else:
-            parts.append(df)
-
-    if not parts:
-        end = now
-        y0, m0 = month_list[0][0], month_list[0][1]
-        start = datetime(y0, m0, 1)
-        prices = yf.download(tickers, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"),
-                            group_by="ticker", auto_adjust=True, threads=True)
-    else:
-        prices = pd.concat(parts, axis=0)
-        if hasattr(prices.index, "duplicated"):
-            prices = prices[~prices.index.duplicated(keep="first")]
-        prices = prices.sort_index()
-    if callback:
-        callback(f"Data: universe prêt ({len(tickers)} tickers, {len(fundamentals)} infos)")
-    try:
-        cache_set("universe_meta", "count", {"n_tickers": len(tickers), "n_fundamentals": len(fundamentals), "updated": datetime.now().isoformat()})
-    except Exception:
-        pass
     return tickers, prices, fundamentals
 
 # ── SINGLE PRICE ──────────────────────────────────────────────
@@ -561,9 +558,26 @@ def fetch_all_data(tickers=None, years=5, callback=None):
         clear_older_than_days(30)
     except Exception as e:
         logger.debug("fetch_all_data: clear_older_than_days failed: %s", e)
-    if callback: callback("Data: universe...")
-    universe_tickers, prices, fundamentals = fetch_universe(years, callback=callback)
-    if tickers: universe_tickers = list(set(universe_tickers + tickers))
+    if callback:
+        callback("Data: universe...")
+    universe_tickers, fundamentals = fetch_universe_cached(years, callback=callback)
+    if tickers:
+        universe_tickers = sorted(set(universe_tickers + tickers))
+
+    # Prices for the (possibly extended) universe
+    import yfinance as yf
+    end = datetime.now()
+    start = end - timedelta(days=years * 365)
+    if callback:
+        callback(f"Data: downloading prices for {len(universe_tickers)} stocks...")
+    prices = yf.download(
+        universe_tickers,
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        group_by="ticker",
+        auto_adjust=True,
+        threads=True,
+    )
 
     if callback: callback("Data: macro...")
     macro = fetch_macro(callback=callback)
@@ -583,11 +597,16 @@ def fetch_all_data(tickers=None, years=5, callback=None):
         n_t, n_f = len(universe_tickers), len(fundamentals)
         callback(f"Data done: {n_t} tickers | {n_f} fundamentals | sentiment {len(sentiment)}")
 
-    now_iso = datetime.now().isoformat()
-    now_display = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.now()
+    now_iso = now.isoformat()
+    now_display = now.strftime("%Y-%m-%d %H:%M")
     data_freshness = {
         "prices": {"last_update_timestamp": now_iso, "data_source": "Yahoo Finance", "display": now_display},
-        "fundamentals": {"last_update_timestamp": now_iso, "data_source": "Yahoo Finance", "display": now_display},
+        "fundamentals": {
+            "last_update_timestamp": now_iso,
+            "data_source": "FMP" if os.environ.get("FMP_API_KEY") else "Yahoo Finance",
+            "display": now_display,
+        },
         "macro": {"last_update_timestamp": now_iso, "data_source": "FRED", "display": now_display},
     }
     return {

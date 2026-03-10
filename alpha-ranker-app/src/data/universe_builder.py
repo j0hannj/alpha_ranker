@@ -175,117 +175,26 @@ def _build_source_chain(
 
 
 def _source_wikipedia_sp500(needed: int) -> Iterator[List[Dict]]:
-    """Yield S&P 500 constituents from Wikipedia (single batch)."""
-    try:
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        html = _fetch_html(url)
-        if not html:
-            raise RuntimeError("Failed to fetch page (403 or network)")
-        tables = pd.read_html(io.StringIO(html))
-        df = tables[0]
-        batch = []
-        for _, row in df.iterrows():
-            ticker = str(row.get("Symbol", row.get("Ticker", ""))).strip().replace(".", "-")
-            if not ticker or ticker == "nan":
-                continue
-            batch.append({
-                "ticker": ticker,
-                "name": str(row.get("Security", row.get("Company", ticker)))[:60],
-                "sector": str(row.get("GICS Sector", ""))[:40],
-                "marketCap": None,
-            })
-        if batch:
-            yield batch
-    except Exception as e:
-        logger.warning("Auto-fill: S&P 500 (Wikipedia) failed: %s", e)
+    """Deprecated: Wikipedia-based S&P 500 scraping removed. Yield empty."""
+    logger.info("Auto-fill: S&P 500 via Wikipedia disabled")
     yield []
 
 
 def _source_wikipedia_stoxx600(needed: int) -> Iterator[List[Dict]]:
-    """Yield STOXX 600 constituents from Wikipedia."""
-    try:
-        url = "https://en.wikipedia.org/wiki/STOXX_Europe_600"
-        html = _fetch_html(url)
-        if not html:
-            raise RuntimeError("Failed to fetch page (403 or network)")
-        tables = pd.read_html(io.StringIO(html))
-        for table in tables:
-            cols = [str(c).lower() for c in table.columns]
-            ticker_col = next((c for c in table.columns if "ticker" in str(c).lower() or "symbol" in str(c).lower()), None)
-            if ticker_col is None:
-                continue
-            name_col = next((c for c in table.columns if "company" in str(c).lower() or "name" in str(c).lower()), None)
-            batch = []
-            for _, row in table.iterrows():
-                ticker = str(row[ticker_col]).strip()
-                if not ticker or ticker == "nan":
-                    continue
-                name = str(row[name_col]).strip() if name_col else ""
-                batch.append({"ticker": ticker, "name": name[:60], "sector": "", "marketCap": None})
-            if batch:
-                yield batch
-                return
-    except Exception as e:
-        logger.warning("Auto-fill: STOXX 600 (Wikipedia) failed: %s", e)
+    """Deprecated: Wikipedia-based STOXX 600 scraping removed. Yield empty."""
+    logger.info("Auto-fill: STOXX 600 via Wikipedia disabled")
     yield []
 
 
 def _source_wikipedia_ftse100(needed: int) -> Iterator[List[Dict]]:
-    """Yield FTSE 100 constituents from Wikipedia (Yahoo suffix .L)."""
-    try:
-        url = "https://en.wikipedia.org/wiki/FTSE_100_Index"
-        html = _fetch_html(url)
-        if not html:
-            raise RuntimeError("Failed to fetch page (403 or network)")
-        tables = pd.read_html(io.StringIO(html))
-        for table in tables:
-            cols = [str(c).lower() for c in table.columns]
-            ticker_col = next((c for c in table.columns if "ticker" in str(c).lower() or "epic" in str(c).lower() or "symbol" in str(c).lower()), None)
-            if ticker_col is None:
-                continue
-            name_col = next((c for c in table.columns if "company" in str(c).lower()), None)
-            batch = []
-            for _, row in table.iterrows():
-                ticker = str(row[ticker_col]).strip()
-                if not ticker or ticker == "nan":
-                    continue
-                yf_ticker = ticker + ".L" if not ticker.endswith(".L") else ticker
-                name = str(row[name_col]).strip() if name_col else ""
-                batch.append({"ticker": yf_ticker, "name": name[:60], "sector": "", "marketCap": None})
-            if batch:
-                yield batch
-                return
-    except Exception as e:
-        logger.warning("Auto-fill: FTSE 100 (Wikipedia) failed: %s", e)
+    """Deprecated: Wikipedia-based FTSE 100 scraping removed. Yield empty."""
+    logger.info("Auto-fill: FTSE 100 via Wikipedia disabled")
     yield []
 
 
 def _source_wikipedia_nikkei225(needed: int) -> Iterator[List[Dict]]:
-    """Yield Nikkei 225 constituents from Wikipedia (Yahoo suffix .T)."""
-    try:
-        url = "https://en.wikipedia.org/wiki/Nikkei_225"
-        html = _fetch_html(url)
-        if not html:
-            raise RuntimeError("Failed to fetch page (403 or network)")
-        tables = pd.read_html(io.StringIO(html))
-        for table in tables:
-            ticker_col = next((c for c in table.columns if "ticker" in str(c).lower() or "code" in str(c).lower() or "symbol" in str(c).lower()), None)
-            if ticker_col is None:
-                continue
-            name_col = next((c for c in table.columns if "company" in str(c).lower() or "name" in str(c).lower()), None)
-            batch = []
-            for _, row in table.iterrows():
-                ticker = str(row[ticker_col]).strip()
-                if not ticker or ticker == "nan":
-                    continue
-                yf_ticker = ticker + ".T" if not ticker.endswith(".T") else ticker
-                name = str(row[name_col]).strip() if name_col else ""
-                batch.append({"ticker": yf_ticker, "name": name[:60], "sector": "", "marketCap": None})
-            if batch:
-                yield batch
-                return
-    except Exception as e:
-        logger.warning("Auto-fill: Nikkei 225 (Wikipedia) failed: %s", e)
+    """Deprecated: Wikipedia-based Nikkei 225 scraping removed. Yield empty."""
+    logger.info("Auto-fill: Nikkei 225 via Wikipedia disabled")
     yield []
 
 
