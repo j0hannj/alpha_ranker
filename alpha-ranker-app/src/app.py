@@ -1350,6 +1350,18 @@ class AlphaRanker(ctk.CTk):
                     if v: os.environ[s]=v
                 hz=int(self.bt_hz.get()); sy=int(self.bt_yr.get())
                 cb("Fetching data..."); _,prices,yf=data.fetch_universe(); mac=data.fetch_macro()
+                # Modélisation : uniquement titres avec ticker ET ISIN
+                try:
+                    import pandas as pd
+                    imap=get_isin_map()
+                    tickers_ok=[t for t in yf if imap.get(t)]
+                    if tickers_ok and len(tickers_ok)<len(yf):
+                        cb(f"Modélisation: {len(tickers_ok)}/{len(yf)} titres avec ISIN")
+                        yf={t:yf[t] for t in tickers_ok if t in yf}
+                        if hasattr(prices,"columns") and isinstance(prices.columns,pd.MultiIndex):
+                            keep=[c for c in prices.columns if isinstance(c,tuple) and len(c)==2 and c[0] in tickers_ok]
+                            if keep: prices=prices[keep].copy()
+                except Exception: pass
                 sm={t:f.get("sector","") for t,f in yf.items()}
                 fk=os.environ.get("FMP_API_KEY")
                 if fk:

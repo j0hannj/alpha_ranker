@@ -198,39 +198,71 @@ def fetch_universe(years=5, callback=None):
     if callback:
         callback(f"Data: {len(fundamentals)}/{len(tickers)} tickers sauvegardés")
 
-    # Prix année par année: cache par an, pas tout recommencer
+    # Prix année par année: cache par an. Si nouveaux tickers ajoutés, on ne télécharge que les manquants puis fusion.
     HOURS_20Y = 24 * 365 * 20
     parts = []
     for idx, y in enumerate(year_list):
         is_current = y == end_year
         max_age_h = 24 if is_current else HOURS_20Y
         cached = cache_get("prices_yearly", str(y), max_age_hours=max_age_h)
+        df = None
         if cached is not None:
             df = _dataframe_from_cache_dict(cached)
             if df is not None and not df.empty:
+                try:
+                    cols = getattr(df, "columns", None)
+                    if cols is not None and len(cols) > 0 and isinstance(cols[0], tuple):
+                        tickers_in_cache = set(c[0] for c in cols if isinstance(c, tuple) and len(c) >= 2)
+                    elif hasattr(cols, "get_level_values"):
+                        tickers_in_cache = set(cols.get_level_values(0).unique())
+                    elif hasattr(cols, "levels") and cols.levels:
+                        tickers_in_cache = set(cols.levels[0])
+                    else:
+                        tickers_in_cache = set()
+                    missing = [t for t in tickers if t not in tickers_in_cache]
+                    if missing:
+                        if callback:
+                            callback(f"Data: année {y} ({idx+1}/{len(year_list)}) cache + {len(missing)} nouveaux tickers")
+                        end_date = datetime.now().strftime("%Y-%m-%d") if is_current else f"{y}-12-31"
+                        try:
+                            new_prices = yf.download(
+                                missing, start=f"{y}-01-01", end=end_date,
+                                group_by="ticker", auto_adjust=True, threads=True, progress=False
+                            )
+                            if not new_prices.empty and hasattr(new_prices, "columns") and len(new_prices.columns) > 0:
+                                df = pd.concat([df, new_prices], axis=1)
+                                try:
+                                    cache_set("prices_yearly", str(y), df.to_dict(orient="split"))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    else:
+                        if callback:
+                            callback(f"Data: année {y} ({idx+1}/{len(year_list)}) cache")
+                except Exception:
+                    pass
+        if df is None or df.empty:
+            if callback:
+                callback(f"Data: téléchargement année {y} ({idx+1}/{len(year_list)})…")
+            end_date = datetime.now().strftime("%Y-%m-%d") if is_current else f"{y}-12-31"
+            try:
+                year_prices = yf.download(
+                    tickers, start=f"{y}-01-01", end=end_date,
+                    group_by="ticker", auto_adjust=True, threads=True, progress=False
+                )
+            except Exception:
+                year_prices = pd.DataFrame()
+            if not year_prices.empty and hasattr(year_prices, "columns") and len(year_prices.columns) > 0:
+                try:
+                    cache_set("prices_yearly", str(y), year_prices.to_dict(orient="split"))
+                except Exception:
+                    pass
                 if callback:
-                    callback(f"Data: année {y} ({idx+1}/{len(year_list)}) cache")
-                parts.append(df)
-                continue
-        if callback:
-            callback(f"Data: téléchargement année {y} ({idx+1}/{len(year_list)})…")
-        end_date = datetime.now().strftime("%Y-%m-%d") if is_current else f"{y}-12-31"
-        try:
-            year_prices = yf.download(
-                tickers, start=f"{y}-01-01", end=end_date,
-                group_by="ticker", auto_adjust=True, threads=True, progress=False
-            )
-        except Exception:
-            year_prices = pd.DataFrame()
-        if year_prices.empty or (hasattr(year_prices, "columns") and len(year_prices.columns) == 0):
-            continue
-        try:
-            cache_set("prices_yearly", str(y), year_prices.to_dict(orient="split"))
-        except Exception:
-            pass
-        if callback:
-            callback(f"Data: année {y} sauvegardée ({idx+1}/{len(year_list)})")
-        parts.append(year_prices)
+                    callback(f"Data: année {y} sauvegardée ({idx+1}/{len(year_list)})")
+                parts.append(year_prices)
+        else:
+            parts.append(df)
 
     if not parts:
         end = datetime.now()
