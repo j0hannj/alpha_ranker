@@ -131,6 +131,21 @@ def fetch_universe(years=5, callback=None):
     if not year_list:
         year_list = [end_year]
 
+    if callback:
+        try:
+            from .api_cache import get_cache_status
+            st = get_cache_status()
+            path_short = str(Path(st["path"]).parent.name) + "/" + Path(st["path"]).name
+            years_cached = [x["year"] for x in st["prices_yearly_years"]]
+            n_tk = st.get("n_tickers")
+            tick_str = f" | {n_tk} tickers" if n_tk is not None else ""
+            if years_cached:
+                callback(f"Cache: {path_short}{tick_str} | {len(years_cached)} années ({min(years_cached)}..{max(years_cached)})")
+            else:
+                callback(f"Cache: {path_short}{tick_str} | aucune année encore (premier run long)")
+        except Exception:
+            pass
+
     tickers = get_universe_tickers(callback=callback)
     fundamentals = {}
     for i, t in enumerate(tickers):
@@ -208,6 +223,10 @@ def fetch_universe(years=5, callback=None):
         prices = prices.sort_index()
     if callback:
         callback(f"Data: universe prêt ({len(tickers)} tickers, {len(fundamentals)} infos)")
+    try:
+        cache_set("universe_meta", "count", {"n_tickers": len(tickers), "n_fundamentals": len(fundamentals), "updated": datetime.now().isoformat()})
+    except Exception:
+        pass
     return tickers, prices, fundamentals
 
 # ── SINGLE PRICE ──────────────────────────────────────────────

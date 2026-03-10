@@ -45,7 +45,7 @@ class AlphaRanker(ctk.CTk):
         self.cpanel.grid(row=0,column=1,sticky="nsew",padx=(0,10),pady=10)
         self.cpanel.grid_propagate(False)
         # Build all
-        for n in ["Portfolio","Rankings","Build","Projections","Backtest","Settings"]:
+        for n in ["Portfolio","Rankings","Build","Projections","Backtest","Universe","Settings"]:
             self.tabs.add(n)
         self._init_style()
         self._init_chat()
@@ -54,6 +54,7 @@ class AlphaRanker(ctk.CTk):
         self._init_build()
         self._init_projections()
         self._init_backtest()
+        self._init_universe()
         self._init_settings()
         # Load cache
         self.all_horizon_results = {}

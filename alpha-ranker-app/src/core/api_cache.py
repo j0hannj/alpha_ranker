@@ -14,6 +14,54 @@ from pathlib import Path
 DB_PATH = Path(__file__).parent.parent.parent / "db" / "api_cache.db"
 
 
+def get_cache_path():
+    """Chemin absolu du fichier SQLite du cache (pour suivre l'état)."""
+    return str(DB_PATH.resolve())
+
+
+def get_cached_ticker_list():
+    """Liste des tickers connus (cache_key pour source=yahoo_info), triée."""
+    try:
+        c = _conn()
+        rows = c.execute(
+            "SELECT cache_key FROM api_cache WHERE source = ? ORDER BY cache_key",
+            ("yahoo_info",),
+        ).fetchall()
+        c.close()
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+
+
+def get_cache_status():
+    """
+    État du cache: nb entrées par source, années disponibles, nombre de tickers/ISIN.
+    Utile pour suivre sans ouvrir la DB à la main.
+    """
+    out = {"path": get_cache_path(), "total": 0, "by_source": {}, "prices_yearly_years": [], "n_tickers": None}
+    try:
+        c = _conn()
+        rows = c.execute(
+            "SELECT source, cache_key, fetched_at FROM api_cache ORDER BY source, cache_key"
+        ).fetchall()
+        c.close()
+        out["total"] = len(rows)
+        for source, cache_key, fetched_at in rows:
+            out["by_source"][source] = out["by_source"].get(source, 0) + 1
+            if source == "prices_yearly":
+                out["prices_yearly_years"].append({"year": cache_key, "fetched_at": fetched_at})
+        out["prices_yearly_years"].sort(key=lambda x: x["year"])
+        # Nombre de tickers: depuis universe_meta si présent, sinon nb de yahoo_info (proxy)
+        meta = get("universe_meta", "count", max_age_hours=24 * 365 * 20)
+        if isinstance(meta, dict) and "n_tickers" in meta:
+            out["n_tickers"] = int(meta["n_tickers"])
+        elif out["by_source"].get("yahoo_info"):
+            out["n_tickers"] = out["by_source"]["yahoo_info"]
+    except Exception:
+        pass
+    return out
+
+
 def _conn():
     DB_PATH.parent.mkdir(exist_ok=True)
     c = sqlite3.connect(str(DB_PATH))
@@ -75,7 +123,7 @@ def set(source: str, cache_key: str, data, fetched_at=None):
 def clear_older_than_days(days: int = 30, exclude_sources=None):
     """Remove cache entries older than `days`. Never touch exclude_sources (e.g. prices_yearly)."""
     if exclude_sources is None:
-        exclude_sources = ("prices_yearly", "yahoo_info", "fmp_fund")
+        exclude_sources = ("prices_yearly",)
     try:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         c = _conn()
