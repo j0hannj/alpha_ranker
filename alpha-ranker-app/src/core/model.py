@@ -124,6 +124,16 @@ def fetch_all_fundamentals(tickers, api_key, callback=None):
     if not to_fetch and data:
         if callback: callback(f"FMP cache (SQLite): {len(data)} tickers (no request)")
         return data
+    if to_fetch:
+        try:
+            test = fetch_fmp_quarterly(to_fetch[0], api_key)
+            if not test:
+                raise Exception("FMP returned empty")
+        except Exception as e:
+            logger.warning("FMP test call failed: %s — skipping all FMP fetches", e)
+            if callback:
+                callback("FMP unavailable. Skipping.")
+            return data
     if FUNDAMENTALS_CACHE.exists() and not data:
         try:
             cache = json.loads(FUNDAMENTALS_CACHE.read_text(encoding="utf-8"))
@@ -158,6 +168,180 @@ def fetch_all_fundamentals(tickers, api_key, callback=None):
             logger.warning("fetch_all_fundamentals: FUNDAMENTALS_CACHE write failed: %s", e)
     if callback: callback(f"FMP: {len(data)} tickers loaded")
     return data
+
+
+def build_fundamentals_from_yfinance(prices, yf_fund, callback=None):
+    """
+    Build fundamentals_db in FMP-like format from yfinance.
+    Used when FMP returns 403. Slower (~1–2s per ticker) but works; results cached in api_cache (yf_fund, 7 days).
+    """
+    import time
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.warning("build_fundamentals_from_yfinance: yfinance not installed")
+        return {}
+    fund_db = {}
+    tickers_with_prices = []
+    if prices is not None and isinstance(prices.columns, pd.MultiIndex):
+        available = set(prices.columns.get_level_values(0).unique())
+        tickers_with_prices = [t for t in yf_fund.keys() if t in available]
+    else:
+        tickers_with_prices = list(yf_fund.keys())
+    max_tickers = 500
+    if len(tickers_with_prices) > max_tickers:
+        us = [t for t in tickers_with_prices if "." not in t]
+        non_us = [t for t in tickers_with_prices if "." in t]
+        tickers_with_prices = (us + non_us)[:max_tickers]
+    if callback:
+        callback(f"Yahoo fundamentals: fetching {len(tickers_with_prices)} tickers...")
+    errors_in_a_row = 0
+    try:
+        from .api_cache import get as cache_get, set as cache_set
+    except Exception:
+        cache_get = cache_set = None
+    for i, ticker in enumerate(tickers_with_prices):
+        if callback and (i + 1) % 50 == 0:
+            callback(f"  Yahoo fundamentals: {i+1}/{len(tickers_with_prices)}...")
+        try:
+            if cache_get:
+                try:
+                    cached = cache_get("yf_fund", ticker, max_age_hours=7 * 24)
+                    if cached and isinstance(cached, list) and len(cached) > 0:
+                        fund_db[ticker] = cached
+                        errors_in_a_row = 0
+                        continue
+                except Exception:
+                    pass
+            t = yf.Ticker(ticker)
+            quarterly_records = []
+            try:
+                inc = t.quarterly_financials
+                bs = t.quarterly_balance_sheet
+                cf = t.quarterly_cashflow
+                info = t.info or {}
+                if inc is not None and not inc.empty:
+                    for col_date in inc.columns:
+                        if hasattr(col_date, "strftime"):
+                            period_date = col_date.strftime("%Y-%m-%d")
+                            filing_dt = col_date + pd.Timedelta(days=45) if hasattr(col_date, "__add__") else col_date
+                            filing_date_str = filing_dt.strftime("%Y-%m-%d") if hasattr(filing_dt, "strftime") else period_date
+                        else:
+                            period_date = str(col_date)
+                            filing_date_str = period_date
+
+                        def _get(df, *keys):
+                            if df is None or df.empty:
+                                return None
+                            for k in keys:
+                                if k in df.index and col_date in df.columns:
+                                    v = df.loc[k, col_date]
+                                    if pd.notna(v):
+                                        return float(v)
+                            return None
+
+                        revenue = _get(inc, "Total Revenue", "Revenue")
+                        net_income = _get(inc, "Net Income", "Net Income Common Stockholders")
+                        ebitda = _get(inc, "EBITDA", "Normalized EBITDA")
+                        eps = _get(inc, "Basic EPS", "Diluted EPS")
+                        gross_profit = _get(inc, "Gross Profit")
+                        operating_income = _get(inc, "Operating Income", "Operating Revenue")
+                        total_equity = _get(bs, "Total Equity Gross Minority Interest", "Stockholders Equity", "Total Stockholders Equity")
+                        total_debt = _get(bs, "Total Debt", "Long Term Debt")
+                        total_assets = _get(bs, "Total Assets")
+                        current_assets = _get(bs, "Current Assets")
+                        current_liabilities = _get(bs, "Current Liabilities")
+                        fcf = _get(cf, "Free Cash Flow")
+                        market_cap = info.get("marketCap")
+                        shares = info.get("sharesOutstanding")
+                        roe_val = (net_income / total_equity * 4) if net_income and total_equity and total_equity != 0 else info.get("returnOnEquity")
+                        de_val = (total_debt / total_equity) if total_debt and total_equity and total_equity != 0 else info.get("debtToEquity")
+                        cr_val = (current_assets / current_liabilities) if current_assets and current_liabilities and current_liabilities != 0 else info.get("currentRatio")
+                        fcf_ps = (fcf / shares) if fcf and shares and shares > 0 else None
+                        rev_ps = (revenue / shares) if revenue and shares and shares > 0 else info.get("revenuePerShare")
+                        gm = (gross_profit / revenue) if gross_profit and revenue and revenue > 0 else info.get("grossMargins")
+                        om = (operating_income / revenue) if operating_income and revenue and revenue > 0 else info.get("operatingMargins")
+                        nm = (net_income / revenue) if net_income and revenue and revenue > 0 else info.get("profitMargins")
+                        record = {
+                            "ticker": ticker,
+                            "filing_date": filing_date_str,
+                            "period_date": period_date,
+                            "revenue": revenue,
+                            "net_income": net_income,
+                            "eps": eps,
+                            "ebitda": ebitda,
+                            "pe_ratio": info.get("trailingPE"),
+                            "pb_ratio": info.get("priceToBook"),
+                            "ev_ebitda": info.get("enterpriseToEbitda"),
+                            "roe": roe_val,
+                            "debt_to_equity": de_val,
+                            "current_ratio": cr_val,
+                            "fcf_per_share": fcf_ps,
+                            "market_cap": market_cap,
+                            "dividend_yield": info.get("dividendYield"),
+                            "revenue_per_share": rev_ps,
+                            "gross_margin": gm,
+                            "operating_margin": om,
+                            "net_margin": nm,
+                            "peg_ratio": info.get("pegRatio"),
+                        }
+                        quarterly_records.append(record)
+            except Exception as e:
+                logger.debug("yf quarterly for %s failed: %s", ticker, e)
+            if not quarterly_records:
+                try:
+                    info = t.info or {}
+                    if info.get("marketCap"):
+                        sh = info.get("sharesOutstanding")
+                        fcf_ps = (info.get("freeCashflow") / sh) if info.get("freeCashflow") and sh else None
+                        record = {
+                            "ticker": ticker,
+                            "filing_date": datetime.now().strftime("%Y-%m-%d"),
+                            "period_date": datetime.now().strftime("%Y-%m-%d"),
+                            "revenue": info.get("totalRevenue"),
+                            "net_income": info.get("netIncomeToCommon"),
+                            "eps": info.get("trailingEps"),
+                            "ebitda": info.get("ebitda"),
+                            "pe_ratio": info.get("trailingPE"),
+                            "pb_ratio": info.get("priceToBook"),
+                            "ev_ebitda": info.get("enterpriseToEbitda"),
+                            "roe": info.get("returnOnEquity"),
+                            "debt_to_equity": info.get("debtToEquity"),
+                            "current_ratio": info.get("currentRatio"),
+                            "fcf_per_share": fcf_ps,
+                            "market_cap": info.get("marketCap"),
+                            "dividend_yield": info.get("dividendYield"),
+                            "revenue_per_share": info.get("revenuePerShare"),
+                            "gross_margin": info.get("grossMargins"),
+                            "operating_margin": info.get("operatingMargins"),
+                            "net_margin": info.get("profitMargins"),
+                            "peg_ratio": info.get("pegRatio"),
+                        }
+                        quarterly_records = [record]
+                except Exception as e:
+                    logger.debug("yf .info for %s failed: %s", ticker, e)
+            if quarterly_records:
+                quarterly_records.sort(key=lambda r: r.get("filing_date", ""))
+                fund_db[ticker] = quarterly_records
+                errors_in_a_row = 0
+                if cache_set:
+                    try:
+                        cache_set("yf_fund", ticker, quarterly_records)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug("build_fundamentals_from_yfinance: %s: %s", ticker, e)
+            errors_in_a_row += 1
+            if errors_in_a_row > 10:
+                if callback:
+                    callback("  Yahoo rate limit detected, pausing 5s...")
+                time.sleep(5)
+                errors_in_a_row = 0
+        if (i + 1) % 20 == 0:
+            time.sleep(0.5)
+    if callback:
+        callback(f"Yahoo fundamentals: {len(fund_db)} tickers loaded ({sum(len(v) for v in fund_db.values())} quarterly records)")
+    return fund_db
 
 # ══════════════════════════════════════════════════════════════
 # TCN / LSTM (optional PyTorch)
