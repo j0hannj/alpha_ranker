@@ -1750,10 +1750,10 @@ class AlphaRanker(ctk.CTk):
                 from pathlib import Path
                 # 1) Essayer d'utiliser le cache de prix (jusqu'à 15 ans)
                 db_dir = Path(__file__).parent.parent / "db"
-                p_path = db_dir / "prices.parquet"
+                p_path = db_dir / "prices.pkl"
                 hist = None
                 if p_path.exists():
-                    prices = pd.read_parquet(p_path)
+                    prices = pd.read_pickle(p_path)
                     if isinstance(prices.columns, pd.MultiIndex):
                         col = (ticker, "Close")
                         if col in prices.columns:
@@ -1775,7 +1775,8 @@ class AlphaRanker(ctk.CTk):
                     return
                 self.after(0,lambda: self._universe_plot(ticker, hist))
             except Exception as e:
-                self.after(0,lambda:self._universe_show_placeholder(ticker,str(e)))
+                msg = str(e)
+                self.after(0,lambda msg=msg:self._universe_show_placeholder(ticker,msg))
         threading.Thread(target=_load,daemon=True).start()
 
     def _universe_show_placeholder(self,ticker,msg):
@@ -1785,9 +1786,18 @@ class AlphaRanker(ctk.CTk):
     def _universe_plot(self,ticker,hist):
         for w in self._universe_chart.winfo_children(): w.destroy()
         try:
-            import matplotlib; matplotlib.use("Agg")
-            from matplotlib.figure import Figure
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            try:
+                import matplotlib; matplotlib.use("Agg")
+                from matplotlib.figure import Figure
+                from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            except ImportError:
+                ctk.CTkLabel(
+                    self._universe_chart,
+                    text="Graphiques indisponibles (module 'matplotlib' non installé).",
+                    text_color="#f97316",
+                    font=("",11),
+                ).pack(pady=30)
+                return
             import numpy as np
             fig=Figure(figsize=(10,4),dpi=100,facecolor="#09090b")
             ax=fig.add_subplot(111); ax.set_facecolor("#09090b")
