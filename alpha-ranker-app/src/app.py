@@ -1434,7 +1434,7 @@ class AlphaRanker(ctk.CTk):
         ctk.CTkButton(top,text="Actualiser la liste",width=120,height=28,font=("",10),fg_color="#27272a",
                       command=self._universe_refresh).pack(side="right",padx=4)
         self._universe_count_lbl=ctk.CTkLabel(top,text="",font=("",10),text_color="#71717a"); self._universe_count_lbl.pack(side="right")
-        # Auto-fill toolbar (target + button + progress)
+        # Auto-fill toolbar (target + region + button + progress)
         autofill=ctk.CTkFrame(tab,fg_color="transparent"); autofill.grid(row=1,column=0,columnspan=2,sticky="ew",pady=(0,6))
         autofill.grid_columnconfigure(1,weight=1)
         ctk.CTkLabel(autofill,text="Cible:",font=("",10),text_color="#a1a1aa").grid(row=0,column=0,padx=(0,4),pady=2)
@@ -1443,11 +1443,15 @@ class AlphaRanker(ctk.CTk):
             default_target=_engine_cfg.DEFAULT_DATA_SETTINGS.get("data_min_tickers",500) or 500
         self._universe_target_entry=ctk.CTkEntry(autofill,width=80,height=28,font=("",10),placeholder_text="500")
         self._universe_target_entry.insert(0,str(default_target)); self._universe_target_entry.grid(row=0,column=1,padx=(0,8),pady=2,sticky="w")
+        ctk.CTkLabel(autofill,text="Région:",font=("",10),text_color="#a1a1aa").grid(row=0,column=2,padx=(8,4),pady=2)
+        self._universe_region_var=ctk.StringVar(value="global")
+        self._universe_region_combo=ctk.CTkComboBox(autofill,values=["Global","US uniquement","Europe uniquement","Asie uniquement"],variable=self._universe_region_var,width=140,height=28,font=("",10))
+        self._universe_region_combo.grid(row=0,column=3,padx=(0,8),pady=2)
         self._btn_auto_fill=ctk.CTkButton(autofill,text="Remplir automatiquement",width=180,height=28,font=("",10),fg_color="#4f46e5",command=self._on_auto_fill_clicked)
-        self._btn_auto_fill.grid(row=0,column=2,padx=4,pady=2)
-        self._universe_progress=ctk.CTkProgressBar(autofill,width=200,height=8); self._universe_progress.grid(row=0,column=3,padx=8,pady=2); self._universe_progress.grid_remove()
-        self._universe_status_lbl=ctk.CTkLabel(autofill,text="",font=("",9),text_color="#71717a"); self._universe_status_lbl.grid(row=0,column=4,padx=4,pady=2); self._universe_status_lbl.grid_remove()
-        self._btn_auto_fill_cancel=ctk.CTkButton(autofill,text="Annuler",width=80,height=28,font=("",10),fg_color="#7f1d1d",command=self._on_auto_fill_cancel); self._btn_auto_fill_cancel.grid(row=0,column=5,padx=4,pady=2); self._btn_auto_fill_cancel.grid_remove()
+        self._btn_auto_fill.grid(row=0,column=4,padx=4,pady=2)
+        self._universe_progress=ctk.CTkProgressBar(autofill,width=200,height=8); self._universe_progress.grid(row=0,column=5,padx=8,pady=2); self._universe_progress.grid_remove()
+        self._universe_status_lbl=ctk.CTkLabel(autofill,text="",font=("",9),text_color="#71717a"); self._universe_status_lbl.grid(row=0,column=6,padx=4,pady=2); self._universe_status_lbl.grid_remove()
+        self._btn_auto_fill_cancel=ctk.CTkButton(autofill,text="Annuler",width=80,height=28,font=("",10),fg_color="#7f1d1d",command=self._on_auto_fill_cancel); self._btn_auto_fill_cancel.grid(row=0,column=7,padx=4,pady=2); self._btn_auto_fill_cancel.grid_remove()
         self._universe_auto_fill_cancel_event=None
         # Left: list of tickers (Treeview)
         left=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8,width=220); left.grid(row=2,column=0,sticky="nsew",padx=(0,4),pady=0)
@@ -1519,9 +1523,11 @@ class AlphaRanker(ctk.CTk):
                     self._universe_progress.set(current/total)
                 self._universe_status_lbl.configure(text=f"Ajout en cours… {current}/{total} — {msg}")
             self.after(0,_update)
+        region_map={"Global":"global","US uniquement":"us","Europe uniquement":"europe","Asie uniquement":"asia"}
+        region=region_map.get(self._universe_region_var.get(),"global")
         def worker():
             from data.universe_builder import auto_fill_universe
-            r=auto_fill_universe(target_count=target,progress_callback=progress_cb,cancel_event=self._universe_auto_fill_cancel_event)
+            r=auto_fill_universe(target_count=target,region=region,progress_callback=progress_cb,cancel_event=self._universe_auto_fill_cancel_event)
             self.after(0,lambda:self._on_auto_fill_complete(r))
         threading.Thread(target=worker,daemon=True).start()
 
@@ -1537,9 +1543,11 @@ class AlphaRanker(ctk.CTk):
         try: target=int(target_str)
         except ValueError: target=500
         added=len(result.get("added",[])); failed=len(result.get("failed",[])); size=result.get("universe_size",0); reached=result.get("target_reached",False)
-        msg=f"Auto-fill terminé:\n  - Ajoutés: {added} actions\n  - Échec ISIN: {failed} (ignorés)\n  - Taille univers: {size}/{target}"
-        if reached: msg+=" ✓"
-        else: msg+="\n  ⚠ Cible non atteinte — sources épuisées"
+        sources_used=result.get("sources_used",[])
+        sources_str=", ".join(sources_used) if sources_used else "aucune"
+        msg=f"Auto-fill terminé:\n  - Ajoutés: {added} actions\n  - Échec ISIN: {failed} (ignorés)\n  - Taille univers: {size}/{target}\n  - Sources: {sources_str}"
+        if reached: msg+="\n  ✓ Cible atteinte"
+        else: msg+="\n  ⚠ Cible non atteinte — toutes les sources ont été épuisées"
         messagebox.showinfo("Auto-Fill",msg)
 
     def _universe_on_select(self,ev):
