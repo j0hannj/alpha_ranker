@@ -67,13 +67,79 @@ def _read_html_with_headers(url: str):
 
 
 WIKIPEDIA_INDICES = [
+    # US — large / mid / small / broad
     {"name": "S&P 500", "url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "suffix": "", "fix_dots": True},
+    {"name": "S&P 400 MidCap", "url": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", "suffix": "", "fix_dots": True},
+    {"name": "S&P 600 SmallCap", "url": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies", "suffix": "", "fix_dots": True},
+    {"name": "S&P 100", "url": "https://en.wikipedia.org/wiki/S%26P_100", "suffix": "", "fix_dots": True},
     {"name": "Nasdaq 100", "url": "https://en.wikipedia.org/wiki/Nasdaq-100", "suffix": "", "fix_dots": True},
+    {"name": "Dow Jones Industrial Average", "url": "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average", "suffix": "", "fix_dots": True},
+    {"name": "Dow Jones Transportation Average", "url": "https://en.wikipedia.org/wiki/Dow_Jones_Transportation_Average", "suffix": "", "fix_dots": True},
+    {"name": "Dow Jones Utility Average", "url": "https://en.wikipedia.org/wiki/Dow_Jones_Utility_Average", "suffix": "", "fix_dots": True},
+
+    # Canada
+    {"name": "S&P/TSX 60", "url": "https://en.wikipedia.org/wiki/S%26P/TSX_60", "suffix": ".TO", "fix_dots": False},
+    {"name": "S&P/TSX Composite", "url": "https://en.wikipedia.org/wiki/S%26P/TSX_Composite_Index", "suffix": ".TO", "fix_dots": False},
+
+    # UK
     {"name": "FTSE 100", "url": "https://en.wikipedia.org/wiki/FTSE_100_Index", "suffix": ".L", "fix_dots": False},
+    {"name": "FTSE 250", "url": "https://en.wikipedia.org/wiki/FTSE_250_Index", "suffix": ".L", "fix_dots": False},
+
+    # Germany
     {"name": "DAX 40", "url": "https://en.wikipedia.org/wiki/DAX", "suffix": ".DE", "fix_dots": False},
+    {"name": "MDAX", "url": "https://en.wikipedia.org/wiki/MDAX", "suffix": ".DE", "fix_dots": False},
+    {"name": "SDAX", "url": "https://en.wikipedia.org/wiki/SDAX", "suffix": ".DE", "fix_dots": False},
+    {"name": "TecDAX", "url": "https://en.wikipedia.org/wiki/TecDAX", "suffix": ".DE", "fix_dots": False},
+
+    # France
     {"name": "CAC 40", "url": "https://en.wikipedia.org/wiki/CAC_40", "suffix": ".PA", "fix_dots": False},
+    {"name": "SBF 120", "url": "https://en.wikipedia.org/wiki/SBF_120", "suffix": ".PA", "fix_dots": False},
+    {"name": "CAC Next 20", "url": "https://en.wikipedia.org/wiki/CAC_Next_20", "suffix": ".PA", "fix_dots": False},
+    {"name": "CAC Mid 60", "url": "https://en.wikipedia.org/wiki/CAC_Mid_60", "suffix": ".PA", "fix_dots": False},
+
+    # Pan-Europe / Eurozone
     {"name": "Euro Stoxx 50", "url": "https://en.wikipedia.org/wiki/EURO_STOXX_50", "suffix": "", "fix_dots": False},
+    {"name": "STOXX Europe 600", "url": "https://en.wikipedia.org/wiki/STOXX_Europe_600", "suffix": "", "fix_dots": False},
+
+    # Benelux / Suisse
+    {"name": "AEX 25", "url": "https://en.wikipedia.org/wiki/AEX_index", "suffix": ".AS", "fix_dots": False},
+    {"name": "BEL 20", "url": "https://en.wikipedia.org/wiki/BEL_20", "suffix": ".BR", "fix_dots": False},
     {"name": "SMI", "url": "https://en.wikipedia.org/wiki/Swiss_Market_Index", "suffix": ".SW", "fix_dots": False},
+    {"name": "SLI", "url": "https://en.wikipedia.org/wiki/Swiss_Leader_Index", "suffix": ".SW", "fix_dots": False},
+    {"name": "SPI", "url": "https://en.wikipedia.org/wiki/Swiss_Performance_Index", "suffix": ".SW", "fix_dots": False},
+
+    # Southern Europe
+    {"name": "IBEX 35", "url": "https://en.wikipedia.org/wiki/IBEX_35", "suffix": ".MC", "fix_dots": False},
+    {"name": "FTSE MIB", "url": "https://en.wikipedia.org/wiki/FTSE_MIB", "suffix": ".MI", "fix_dots": False},
+    {"name": "PSI 20", "url": "https://en.wikipedia.org/wiki/PSI_20", "suffix": ".LS", "fix_dots": False},
+    {"name": "ATX", "url": "https://en.wikipedia.org/wiki/Austrian_Traded_Index", "suffix": ".VI", "fix_dots": False},
+
+    # Nordics
+    {"name": "OBX 25", "url": "https://en.wikipedia.org/wiki/OBX_Index", "suffix": ".OL", "fix_dots": False},
+    {"name": "OMX Stockholm 30", "url": "https://en.wikipedia.org/wiki/OMX_Stockholm_30", "suffix": ".ST", "fix_dots": False},
+    {"name": "OMX Helsinki 25", "url": "https://en.wikipedia.org/wiki/OMX_Helsinki_25", "suffix": ".HE", "fix_dots": False},
+    {"name": "OMX Copenhagen 25", "url": "https://en.wikipedia.org/wiki/OMX_Copenhagen_25", "suffix": ".CO", "fix_dots": False},
+
+    # Ireland / CEE
+    {"name": "ISEQ 20", "url": "https://en.wikipedia.org/wiki/ISEQ_20", "suffix": ".IR", "fix_dots": False},
+    {"name": "WIG 20", "url": "https://en.wikipedia.org/wiki/WIG20", "suffix": ".WA", "fix_dots": False},
+
+    # Japan / Asia-Pacific developed
+    {"name": "Nikkei 225", "url": "https://en.wikipedia.org/wiki/Nikkei_225", "suffix": ".T", "fix_dots": False},
+    {"name": "S&P/ASX 200", "url": "https://en.wikipedia.org/wiki/S%26P/ASX_200", "suffix": ".AX", "fix_dots": False},
+    {"name": "Hang Seng Index", "url": "https://en.wikipedia.org/wiki/Hang_Seng_Index", "suffix": ".HK", "fix_dots": False},
+    {"name": "STI", "url": "https://en.wikipedia.org/wiki/Straits_Times_Index", "suffix": ".SI", "fix_dots": False},
+    {"name": "S&P/NZX 50", "url": "https://en.wikipedia.org/wiki/S%26P/NZX_50_Index", "suffix": ".NZ", "fix_dots": False},
+
+    # India
+    {"name": "BSE SENSEX", "url": "https://en.wikipedia.org/wiki/BSE_SENSEX", "suffix": ".BO", "fix_dots": False},
+    {"name": "NIFTY 50", "url": "https://en.wikipedia.org/wiki/NIFTY_50", "suffix": ".NS", "fix_dots": False},
+
+    # Emerging / others (sélection d’indices avec tableau)
+    {"name": "TA-35", "url": "https://en.wikipedia.org/wiki/TA-35_Index", "suffix": ".TA", "fix_dots": False},
+    {"name": "Ibovespa", "url": "https://en.wikipedia.org/wiki/Ibovespa", "suffix": ".SA", "fix_dots": False},
+    {"name": "FTSE/JSE Top 40", "url": "https://en.wikipedia.org/wiki/FTSE/JSE_Top_40_Index", "suffix": ".JO", "fix_dots": False},
+    {"name": "BIST 30", "url": "https://en.wikipedia.org/wiki/BIST_30", "suffix": ".IS", "fix_dots": False},
 ]
 
 
