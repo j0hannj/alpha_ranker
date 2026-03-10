@@ -1730,7 +1730,7 @@ def run_full_pipeline(callback=None):
     """Main entry. Fetches all data, trains ensemble, generates alpha rankings.
     Returns (results_df, feature_importance, model_info, macro). Uses as_of_date=last price date when deterministic_mode for reproducibility.
     Data years are sized to the max horizon (e.g. 10Y horizon → 10 years of history)."""
-    from .data import fetch_all_data
+    from .data import fetch_all_data, load_macro_history_from_db
     try:
         from core.engine_config import get_model_settings, init_default_config
         init_default_config()
@@ -1748,9 +1748,16 @@ def run_full_pipeline(callback=None):
     if callback: callback(f"Loading up to {data_years}y data (max {max_history}y) for horizons {horizons_cfg}...")
     alldata = fetch_all_data(years=data_years, callback=callback)
     tickers = alldata["tickers"]; prices = alldata["prices"]
-    yf_fund = alldata["fundamentals"]; macro = alldata["macro"]
+    yf_fund = alldata["fundamentals"]
     macro_by_region = alldata.get("macro_by_region") or {}
     sentiment = alldata.get("sentiment",{})
+    # Macro: single source of truth = existing DB (mirror fundamentals behavior)
+    macro_df = load_macro_history_from_db()
+    if macro_df is not None and len(macro_df) > 0:
+        macro_latest = macro_df.iloc[-1].to_dict()
+    else:
+        macro_latest = alldata.get("macro") or {}
+    macro = macro_latest  # for backward compat in _run_simple / detect_market_regime / cache
     # Train on full universe. ISIN is used only for display (get_display_id) when available.
     sector_map = {t:f.get("sector","Unknown") for t,f in yf_fund.items()}
     fmp_key = os.environ.get("FMP_API_KEY")
@@ -1805,7 +1812,7 @@ def run_full_pipeline(callback=None):
             config_h = {**config, "prediction_horizon_months": H}
             # Calibration window matches horizon: 10Y horizon → 10 years of data
             start_year_H = ref_year - max(H // 12, 1)
-            wf = walk_forward_train(prices,fund_db,macro,sector_map,list(fund_db.keys()),
+            wf = walk_forward_train(prices,fund_db,macro_df,sector_map,list(fund_db.keys()),
                                    start_year=start_year_H,horizon_months=H,callback=callback,config=config_h,as_of_date=as_of_date,
                                    macro_by_region=macro_by_region)
             if wf[0] is None:
@@ -1823,7 +1830,7 @@ def run_full_pipeline(callback=None):
             else:
                 logger.info("predict_current: alpha_spread=%.4f (from oos mean_ls_return) -> scaling alpha score to expected return pct", float(alpha_spread))
             results_h, blend = predict_current(
-                final_models, medians, feat_cols, prices, fund_db, macro, sector_map, list(yf_fund.keys()),
+                final_models, medians, feat_cols, prices, fund_db, macro_df, sector_map, list(yf_fund.keys()),
                 yf_info=yf_fund, callback=callback, config=config_h, as_of_date=as_of_date,
                 macro_by_region=macro_by_region, fitted_decorrelation=fitted_decorrelation, alpha_spread=alpha_spread,
                 fitted_winsorizer=fitted_winsorizer, fitted_rank_transformer=fitted_rank,

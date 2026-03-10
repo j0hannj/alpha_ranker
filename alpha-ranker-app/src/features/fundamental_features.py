@@ -8,7 +8,7 @@ and backtest engines.
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -40,18 +40,39 @@ def get_fundamentals_asof(ticker_data: List[dict], as_of_date) -> Optional[dict]
     return {**latest, **ttm}
 
 
+def _get_macro_asof(macro_df: pd.DataFrame, as_of: pd.Timestamp) -> Optional[Dict]:
+    """Return macro row as of date (most recent <= as_of). Mirrors get_fundamentals_asof for macro."""
+    if macro_df is None or not isinstance(macro_df, pd.DataFrame) or len(macro_df) == 0:
+        return None
+    try:
+        subset = macro_df.loc[:as_of]
+        if len(subset) == 0:
+            return None
+        row = subset.iloc[-1]
+        return row.to_dict() if hasattr(row, "to_dict") else dict(row)
+    except Exception:
+        return None
+
+
 def build_features_asof(
     prices,
     fundamentals_db: Dict[str, List[dict]],
-    macro: Dict,
+    macro: Union[Dict, pd.DataFrame],
     as_of_date,
     tickers: Iterable[str],
     macro_by_region: Optional[Dict[str, Dict]] = None,
     get_region: Optional[Callable[[str], str]] = None,
 ) -> pd.DataFrame:
     """Build feature matrix using ONLY data available at as_of_date.
+    macro: either a dict (single snapshot, backward compat) or a time-indexed DataFrame from load_macro_history_from_db();
+    then macro_features = macro_df.loc[:date_t].iloc[-1] is used so only info available at as_of_date is used.
     If macro_by_region and get_region are provided, macro features use the ticker's region (non-US)."""
     as_of = pd.Timestamp(as_of_date)
+    # Resolve macro snapshot for this date (mirror fundamentals: as-of lookup)
+    if isinstance(macro, pd.DataFrame) and len(macro) > 0:
+        macro_snapshot = _get_macro_asof(macro, as_of)
+    else:
+        macro_snapshot = macro if isinstance(macro, dict) else None
     records: List[dict] = []
     for ticker in tickers:
         row: Dict = {"ticker": ticker, "date": str(as_of_date)}
@@ -119,26 +140,33 @@ def build_features_asof(
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning("build_features_asof: price/technical feature failed for %s: %s", ticker, e)
-        # Macro features: par région si macro_by_region + get_region, sinon macro global (US)
+        # Macro features: from DB history (as-of date) or region dict / snapshot dict
+        effective = None
         if macro_by_region and get_region is not None:
             region = get_region(ticker)
-            region_macro = (macro_by_region.get(region) or macro_by_region.get("US") or macro) if isinstance(macro_by_region, dict) else macro
+            region_macro = (macro_by_region.get(region) or macro_by_region.get("US") or macro_snapshot) if isinstance(macro_by_region, dict) else macro_snapshot
             if isinstance(region_macro, dict):
                 effective = {
-                    "fed_funds_rate": region_macro.get("policy_rate"),
-                    "us_10y_yield": region_macro.get("yield_10y"),
-                    "us_2y_yield": region_macro.get("yield_2y"),
+                    "fed_funds_rate": region_macro.get("policy_rate") or region_macro.get("fed_funds_rate"),
+                    "us_10y_yield": region_macro.get("yield_10y") or region_macro.get("us_10y_yield"),
+                    "us_2y_yield": region_macro.get("yield_2y") or region_macro.get("us_2y_yield"),
                     "yield_curve_slope": region_macro.get("yield_curve_slope"),
                     "oil_price": region_macro.get("oil_price"),
                     "vix": region_macro.get("vix"),
                     "credit_spread": region_macro.get("credit_spread"),
+                    "interest_rate_level": region_macro.get("interest_rate_level"),
+                    "inflation_yoy": region_macro.get("inflation_yoy"),
+                    "unemployment_rate": region_macro.get("unemployment_rate"),
+                    "industrial_production_growth": region_macro.get("industrial_production_growth"),
                 }
-                for k, v in effective.items():
-                    if v is not None and isinstance(v, (int, float)):
-                        row[f"macro_{k}"] = v
-        elif isinstance(macro, dict):
-            for k, v in macro.items():
-                if isinstance(v, (int, float)):
+        elif macro_snapshot:
+            effective = dict(macro_snapshot) if not isinstance(macro_snapshot, dict) else macro_snapshot
+        if effective:
+            skip_keys = {"source", "date"}
+            for k, v in effective.items():
+                if k in skip_keys or v is None:
+                    continue
+                if isinstance(v, (int, float)) and not (isinstance(v, float) and np.isnan(v)):
                     row[f"macro_{k}"] = v
         records.append(row)
     return pd.DataFrame(records)

@@ -1222,7 +1222,12 @@ class AlphaRanker(ctk.CTk):
         info=self.model_info or {}
         fresh=info.get("data_freshness") or {}
         disp=fresh.get("prices",{}).get("display") if isinstance(fresh.get("prices"),dict) else None
-        if disp: self.bld_data_as_of.configure(text=f"Data as of: {disp}")
+        macro_disp=fresh.get("macro",{}).get("display") if isinstance(fresh.get("macro"),dict) else None
+        if disp or macro_disp:
+            parts=[]
+            if disp: parts.append(f"Data as of: {disp}")
+            if macro_disp: parts.append(f"Macro: {macro_disp}")
+            self.bld_data_as_of.configure(text=" | ".join(parts))
         elif info.get("saved_at"): self.bld_data_as_of.configure(text=f"Data as of: {str(info['saved_at'])[:16]}")
         else: self.bld_data_as_of.configure(text="")
 

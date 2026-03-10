@@ -475,6 +475,16 @@ def load_macro_series():
         c.close()
 
 
+def get_macro_last_update_date():
+    """Return the latest macro date in the DB (YYYY-MM-DD) or None if table is empty."""
+    c = _conn()
+    try:
+        row = c.execute("SELECT MAX(date) FROM macro").fetchone()
+        return row[0] if row and row[0] else None
+    finally:
+        c.close()
+
+
 def upsert_macro_by_region(rows):
     """
     Insert macro rows per region. rows: iterable of dicts with date, region, policy_rate, yield_10y, ...

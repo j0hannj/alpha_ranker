@@ -1274,6 +1274,35 @@ GLOBAL_MACRO_SERIES = {"vix": "VIXCLS", "oil_price": "DCOILWTICO"}
 MACRO_LAST_RESORT_US = {"fed_funds_rate": 4.0, "us_10y_yield": 4.0, "us_2y_yield": 4.0, "yield_curve_slope": 0.0, "oil_price": 75.0, "vix": 20.0, "credit_spread": 1.5}
 
 
+def load_macro_history_from_db():
+    """
+    Load full macro history from the existing database (single source of truth).
+    Returns a time-indexed DataFrame for as-of-date queries. No new files or caches.
+    Example: macro_df.loc[:date_t].iloc[-1] for macro at time t.
+    """
+    try:
+        from . import portfolio as _pf
+        series = _pf.load_macro_series()
+    except Exception as e:
+        logger.warning("load_macro_history_from_db: failed to read macro from DB: %s", e)
+        return pd.DataFrame()
+    if not series:
+        logger.warning("load_macro_history_from_db: database contains no macro history; model will run without macro features.")
+        return pd.DataFrame()
+    df = pd.DataFrame(series)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"]).set_index("date").sort_index()
+    df.index = df.index.normalize()
+    # Engineered features (align with build_features_asof)
+    df["interest_rate_level"] = df["fed_funds_rate"] if "fed_funds_rate" in df.columns else np.nan
+    if "yield_curve_slope" not in df.columns and "us_10y_yield" in df.columns and "us_2y_yield" in df.columns:
+        df["yield_curve_slope"] = df["us_10y_yield"] - df["us_2y_yield"]
+    df["inflation_yoy"] = df["cpi_yoy"] if "cpi_yoy" in df.columns else np.nan
+    df["unemployment_rate"] = np.nan  # reserved for future DB/FRED series
+    df["industrial_production_growth"] = np.nan  # reserved for future DB/FRED series
+    return df
+
+
 def _macro_row_to_db(macro_dict, source="FRED"):
     """Build one row for table macro from a macro dict (date + series)."""
     date_val = macro_dict.get("date") or datetime.now().strftime("%Y-%m-%d")
@@ -1530,12 +1559,12 @@ def fetch_macro_by_region(callback=None):
                 db_rows.append(r_out)
             last_row = hist.iloc[-1]
             out = {
-                "policy_rate": round(float(last_row["policy_rate"]), 2) if "policy_rate" in hist.columns and pd.notna(last_row.get("policy_rate")) else out.get("policy_rate"),
-                "yield_10y": round(float(last_row["yield_10y"]), 2) if "yield_10y" in hist.columns and pd.notna(last_row.get("yield_10y")) else out.get("yield_10y"),
-                "yield_2y": round(float(last_row["yield_2y"]), 2) if "yield_2y" in hist.columns and pd.notna(last_row.get("yield_2y")) else out.get("yield_2y"),
+                "policy_rate": round(float(last_row.get("policy_rate")), 2) if "policy_rate" in hist.columns and pd.notna(last_row.get("policy_rate")) else out.get("policy_rate"),
+                "yield_10y": round(float(last_row.get("yield_10y")), 2) if "yield_10y" in hist.columns and pd.notna(last_row.get("yield_10y")) else out.get("yield_10y"),
+                "yield_2y": round(float(last_row.get("yield_2y")), 2) if "yield_2y" in hist.columns and pd.notna(last_row.get("yield_2y")) else out.get("yield_2y"),
                 "oil_price": global_vals.get("oil_price"),
                 "vix": global_vals.get("vix"),
-                "credit_spread": round(float(last_row["credit_spread"]), 2) if "credit_spread" in hist.columns and pd.notna(last_row.get("credit_spread")) else out.get("credit_spread"),
+                "credit_spread": round(float(last_row.get("credit_spread")), 2) if "credit_spread" in hist.columns and pd.notna(last_row.get("credit_spread")) else out.get("credit_spread"),
             }
             if out.get("yield_10y") is not None and out.get("yield_2y") is not None:
                 out["yield_curve_slope"] = round(out["yield_10y"] - out["yield_2y"], 2)
@@ -1769,6 +1798,13 @@ def fetch_all_data(tickers=None, years=5, callback=None):
     now = datetime.now()
     now_iso = now.isoformat()
     now_display = now.strftime("%Y-%m-%d %H:%M")
+    macro_last_date = None
+    try:
+        from . import portfolio as _pf_macro
+        macro_last_date = _pf_macro.get_macro_last_update_date()
+    except Exception:
+        pass
+    macro_display = macro_last_date if macro_last_date else now_display
     data_freshness = {
         "prices": {"last_update_timestamp": now_iso, "data_source": "Yahoo Finance", "display": now_display},
         "fundamentals": {
@@ -1776,7 +1812,7 @@ def fetch_all_data(tickers=None, years=5, callback=None):
             "data_source": "FMP" if os.environ.get("FMP_API_KEY") else "Yahoo Finance",
             "display": now_display,
         },
-        "macro": {"last_update_timestamp": now_iso, "data_source": "FRED", "display": now_display},
+        "macro": {"last_update_timestamp": now_iso, "data_source": "DB", "display": macro_display},
     }
     return {
         "tickers": universe_tickers,
