@@ -97,6 +97,7 @@ def _conn():
         spearman_rank_corr REAL,
         hit_rate REAL,
         ic_ir REAL,
+        mean_ls_return REAL,
         n_stocks INTEGER,
         n_features INTEGER,
         prediction_horizon_months INTEGER,
@@ -106,6 +107,9 @@ def _conn():
         fund_source TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
+    mr_info = {row[1] for row in c.execute("PRAGMA table_info(model_runs)").fetchall()}
+    if "mean_ls_return" not in mr_info:
+        c.execute("ALTER TABLE model_runs ADD COLUMN mean_ls_return REAL")
     c.execute("""CREATE INDEX IF NOT EXISTS idx_model_runs_timestamp ON model_runs(run_timestamp DESC)""")
     c.execute("""CREATE INDEX IF NOT EXISTS idx_model_runs_run_id ON model_runs(run_id)""")
     c.execute("""CREATE TABLE IF NOT EXISTS trade_history (
@@ -746,6 +750,8 @@ def save_model_run(model_info, run_id=None):
     hit_rate = float(hit_rate) if hit_rate is not None and (isinstance(hit_rate, float) and hit_rate == hit_rate or isinstance(hit_rate, (int, float))) else None
     ic_ir = model_info.get("ic_ir")
     ic_ir = float(ic_ir) if ic_ir is not None and (isinstance(ic_ir, float) and ic_ir == ic_ir or isinstance(ic_ir, (int, float))) else None
+    mean_ls_return = model_info.get("mean_ls_return")
+    mean_ls_return = float(mean_ls_return) if mean_ls_return is not None and (isinstance(mean_ls_return, (int, float)) and (not isinstance(mean_ls_return, float) or mean_ls_return == mean_ls_return)) else None
     n_stocks = model_info.get("n_stocks")
     n_stocks = int(n_stocks) if n_stocks is not None else None
     n_features = model_info.get("n_features")
@@ -762,10 +768,13 @@ def save_model_run(model_info, run_id=None):
     try:
         c = _conn()
         c.execute(
-            """INSERT INTO model_runs (run_id, run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, ic_ir, n_stocks, n_features, prediction_horizon_months, horizons_trained, per_model_ic, is_degraded, fund_source)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (run_id, run_ts, mode, mean_ic, spearman, hit_rate, ic_ir, n_stocks, n_features, horizon, horizons_trained, per_model_ic, is_degraded, fund_source),
+            """INSERT INTO model_runs (run_id, run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, ic_ir, mean_ls_return, n_stocks, n_features, prediction_horizon_months, horizons_trained, per_model_ic, is_degraded, fund_source)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (run_id, run_ts, mode, mean_ic, spearman, hit_rate, ic_ir, mean_ls_return, n_stocks, n_features, horizon, horizons_trained, per_model_ic, is_degraded, fund_source),
         )
+        c.commit()
+        # Keep only last 100 runs
+        c.execute("DELETE FROM model_runs WHERE id NOT IN (SELECT id FROM model_runs ORDER BY run_timestamp DESC LIMIT 100)")
         c.commit()
     except Exception as e:
         logger.warning("save_model_run failed: %s", e)
@@ -781,7 +790,7 @@ def get_model_run_history(limit=50):
     """Return the last N model runs for stability analysis. Each row: run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, etc."""
     c = _conn()
     rows = c.execute(
-        """SELECT run_id, run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, ic_ir, n_stocks, n_features, prediction_horizon_months, horizons_trained, per_model_ic, is_degraded, fund_source
+        """SELECT run_id, run_timestamp, mode, mean_ic, spearman_rank_corr, hit_rate, ic_ir, mean_ls_return, n_stocks, n_features, prediction_horizon_months, horizons_trained, per_model_ic, is_degraded, fund_source
            FROM model_runs ORDER BY run_timestamp DESC LIMIT ?""",
         (limit,),
     ).fetchall()

@@ -816,7 +816,7 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
             "ic_series":[round(float(v),4) for v in ic_per.values],
             "per_model_ic":{n:round(np.mean(v),4) for n,v in per_model_oos.items() if v}}
     else:
-        oos_metrics = {"n_predictions":0,"per_model_ic":{},"mean_ic":0,"ic_std":0,"ic_ir":0,"hit_rate":0,"spearman_rank_corr":0}
+        oos_metrics = {"n_predictions":0,"per_model_ic":{},"mean_ic":0,"ic_std":0,"ic_ir":0,"hit_rate":0,"spearman_rank_corr":0,"mean_ls_return":0}
     if callback:
         callback(f"Ensemble OOS Rank IC: {oos_metrics.get('spearman_rank_corr','?')}")
         for n,ic in oos_metrics.get("per_model_ic",{}).items(): callback(f"  {n}: IC={ic:.4f}")
@@ -858,8 +858,9 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
 # ══════════════════════════════════════════════════════════════
 def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
                     macro, sector_map, tickers, yf_info=None, callback=None, config=None, as_of_date=None,
-                    macro_by_region=None, fitted_decorrelation=None):
-    """Generate current alpha scores and ranks using the trained ensemble. as_of_date: use last price date when set for reproducibility.
+                    macro_by_region=None, fitted_decorrelation=None, alpha_spread=None):
+    """Generate current alpha scores and ranks using the trained ensemble. Model output is an alpha score (ranking signal), not a direct return.
+    alpha_spread: historical long-short return from training (mean_ls_return); used to scale alpha_score into expected_return_estimate.
     fitted_decorrelation: when feature_decorrelation is enabled, the transformer fitted at training time (do not refit at inference)."""
     if config is None:
         try:
@@ -928,12 +929,10 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     else:
         df["model_agreement_score"] = 1.0
 
-    # Return prediction: raw model output (never use neutralized score for predicted return).
+    # Alpha score: model output is a ranking signal, not a direct return forecast.
     df["alpha_score_raw"] = preds
     df["alpha_score_raw"] = df["alpha_score_raw"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    df["predicted_return_pct"] = (df["alpha_score_raw"] * 100).round(2)
-    df["predicted_return_pct"] = df["predicted_return_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    # Ranking signal: derived from raw score after factor neutralization; affects only rank, not predicted return.
+    # Ranking signal: derived from raw score after factor neutralization.
     df["alpha_score"] = factor_neutralize_scores(
         df,
         score_col="alpha_score_raw",
@@ -944,7 +943,19 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     df["alpha_rank"] = range(1, len(df) + 1)
     df["rank"] = df["alpha_rank"]  # backward compat
 
-    # Confidence = z-score of raw prediction (same scale as predicted_return_pct)
+    # Expected return estimate: scale alpha score by historical long-short spread (not raw model output).
+    pred_arr = np.asarray(preds)
+    z_score = (pred_arr - np.mean(pred_arr)) / (np.std(pred_arr) + 1e-9)
+    if alpha_spread is not None and float(alpha_spread) > 0:
+        # ±2 z-score ≈ ±alpha_spread (decimal); convert to pct
+        expected_ret_pct = 100.0 * z_score * (float(alpha_spread) / 2.0)
+        df["expected_return_estimate_pct"] = np.round(expected_ret_pct, 2)
+        df["predicted_return_pct"] = df["expected_return_estimate_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    else:
+        df["expected_return_estimate_pct"] = np.nan
+        df["predicted_return_pct"] = 0.0  # do not show raw score as return
+
+    # Confidence = z-score of raw alpha (relative conviction)
     med, std = np.median(preds), np.std(preds)
     df["confidence"] = ((preds - med) / std).round(2) if std > 0 else 0
     df["confidence"] = df["confidence"].fillna(0.0)
@@ -954,12 +965,8 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     c_norm = (cr - cr.min()) / (cr.max() - cr.min() + 1e-9)
     df["reliability_score"] = (0.4 * a_norm + 0.3 * c_norm + 0.3 * df["model_agreement_score"]).round(3)
     df["reliability_score"] = df["reliability_score"].fillna(0.0)
-    nan_count = df["predicted_return_pct"].isna().sum()
-    if nan_count > 0:
-        logger.warning(
-            "predict_current: %d NaN in predicted_return_pct, filling with 0", nan_count
-        )
-        df["predicted_return_pct"] = df["predicted_return_pct"].fillna(0.0)
+    df["predicted_return_pct"] = df["predicted_return_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df["expected_return_estimate_pct"] = df.get("expected_return_estimate_pct", df["predicted_return_pct"]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     # Rename for display compatibility
     for col in ["pe_ratio","peg_ratio","revenue_growth_yoy","gross_margin","net_margin",
@@ -1437,6 +1444,13 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         oos_ic = round(float(rc), 4) if rc == rc else 0.0
     else:
         oos_ic = 0.0
+    # Long-short spread (top quintile - bottom quintile) for return scaling
+    ls_ret_simple = []
+    if len(oos_df) >= 20:
+        g = oos_df.sort_values("predicted", ascending=False)
+        n = max(len(g) // 5, 2)
+        ls_ret_simple.append(g.head(n)["actual"].mean() - g.tail(n)["actual"].mean())
+    mean_ls_return = round(float(np.mean(ls_ret_simple)), 4) if ls_ret_simple else 0.0
 
     # 4) Entraîner l'ensemble final sur TOUTES les périodes
     if callback:
@@ -1531,11 +1545,18 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         sector_col="sector",
     )
     results["alpha_score"] = results["alpha_score"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    results["predicted_return_pct"] = (results["alpha_score_raw"] * 100).round(2)
-    results["predicted_return_pct"] = results["predicted_return_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     results = results.sort_values("alpha_score", ascending=False).reset_index(drop=True)
     results["alpha_rank"] = range(1, len(results) + 1)
     results["rank"] = results["alpha_rank"]
+    # Expected return estimate from historical long-short spread (after sort; use sorted alpha_score_raw)
+    araw = results["alpha_score_raw"].values.astype(float)
+    z_score = (araw - np.nanmean(araw)) / (np.nanstd(araw) + 1e-9)
+    if mean_ls_return and float(mean_ls_return) > 0:
+        results["expected_return_estimate_pct"] = np.round(100.0 * z_score * (float(mean_ls_return) / 2.0), 2)
+        results["predicted_return_pct"] = results["expected_return_estimate_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    else:
+        results["expected_return_estimate_pct"] = 0.0
+        results["predicted_return_pct"] = 0.0
 
     med_pred, std_pred = np.median(preds), np.std(preds)
     results["confidence"] = ((preds - med_pred) / std_pred).round(2) if std_pred > 0 else 0
@@ -1555,6 +1576,7 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
 
     feat_imp = _get_feature_importance(ensemble, fcols)
     pm = {n: {"ic": info.get("ic", 0)} for n, info in ensemble.items()}
+    per_model_ic = {n: round(info.get("ic", 0), 4) for n, info in ensemble.items()}
     hit_rate = (
         round((oos_df["predicted"] * oos_df["actual"] > 0).mean(), 4) if len(oos_df) > 0 else 0.5
     )
@@ -1567,7 +1589,9 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         "mean_ic": oos_ic,
         "ic_ir": 0,
         "hit_rate": hit_rate,
+        "mean_ls_return": mean_ls_return,
         "per_model": pm,
+        "per_model_ic": per_model_ic,
         "blend": blend,
     }
     if callback:
@@ -1749,10 +1773,11 @@ def run_full_pipeline(callback=None):
                 single_id = config_h.get("single_model_id")
                 if single_id and single_id in final_models:
                     final_models = {single_id: final_models[single_id]}
+            alpha_spread = oos_metrics.get("mean_ls_return")
             results_h,blend = predict_current(final_models,medians,feat_cols,prices,fund_db,
                                             macro,sector_map,list(yf_fund.keys()),
                                             yf_info=yf_fund,callback=callback,config=config_h,as_of_date=as_of_date,
-                                            macro_by_region=macro_by_region,fitted_decorrelation=fitted_decorrelation)
+                                            macro_by_region=macro_by_region,fitted_decorrelation=fitted_decorrelation,alpha_spread=alpha_spread)
             if sentiment: results_h["news_sentiment"] = results_h["ticker"].map(sentiment).fillna(0)
             all_horizon_results[H] = {"results": results_h,"feat_imp": feat_imp,"oos_metrics": oos_metrics,"blend": blend}
             if callback: callback(f"  {lbl} done: IC={oos_metrics.get('spearman_rank_corr','?')} | {len(results_h)} stocks", (idx + 1) / total_h)

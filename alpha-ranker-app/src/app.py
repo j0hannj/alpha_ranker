@@ -680,10 +680,13 @@ class AlphaRanker(ctk.CTk):
         for m, lbl in [("3","3M"),("6","6M"),("12","12M"),("24","24M"),("120","10Y")]:
             ctk.CTkRadioButton(ff,text=lbl,variable=self.hz_var,value=m,font=("",10),
                               command=self._upd_rankings).pack(side="left",padx=2)
+        self.rk_show_all_var=ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(ff,text="Toutes les prédictions",variable=self.rk_show_all_var,font=("",10),
+                        command=self._upd_rankings).pack(side="left",padx=(12,0))
         ctk.CTkLabel(ff,text="Horizon = best performers for that horizon. Run model to generate all.",font=("",9),text_color="#71717a").pack(side="left",padx=(8,0))
         cols=("rank","isin","ticker","name","sector","change","stability","return","conviction","analyst","sentiment","pe","growth","fcf","mom")
         self.rk_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["#","ISIN","Ticker","Name","Sector","Change","Stability","Predicted","Conv","Analyst","Sent","P/E","Grwth","FCF","Mom"],
+        for c,h,w in zip(cols,["#","ISIN","Ticker","Name","Sector","Change","Stability","Return (est.)","Conv","Analyst","Sent","P/E","Grwth","FCF","Mom"],
                           [30,100,60,115,85,58,95,72,62,58,58,48,50,48,50]):
             self.rk_tree.heading(c,text=h); self.rk_tree.column(c,width=w,anchor="e" if c not in ("isin","ticker","name","sector","analyst","stability") else "w")
         self.rk_tree.grid(row=1,column=0,sticky="nsew")
@@ -782,17 +785,22 @@ class AlphaRanker(ctk.CTk):
     def _upd_rankings(self):
         if self.model_results is None: return
         hz=int(self.hz_var.get())
+        show_all = getattr(self,"rk_show_all_var",None) and self.rk_show_all_var.get()
         all_hr=getattr(self,"all_horizon_results",None) or {}
         if all_hr and hz in all_hr:
-            df50=all_hr[hz]["results"].head(50).copy()
+            full_df = all_hr[hz]["results"].copy()
             hz_lbl = "10Y" if hz == 120 else f"{hz}M"
-            if hasattr(self,"rk_status"):
-                self.rk_status.configure(text=f"Viewing: {hz_lbl} ranking (best performers for this horizon)", text_color="#34d399")
+            status_base = f"Viewing: {hz_lbl} ranking (best performers for this horizon)"
+            status_color = "#34d399"
         else:
-            df50=self.model_results.head(50).copy()
-            if all_hr and not all_hr.get(hz):
-                hz_lbl = "10Y" if hz == 120 else f"{hz}M"
-                self.rk_status.configure(text=f"Horizon {hz_lbl}: run model to generate", text_color="#a1a1aa")
+            full_df = self.model_results.copy()
+            hz_lbl = "10Y" if hz == 120 else f"{hz}M"
+            status_base = f"Horizon {hz_lbl}: run model to generate" if (all_hr and not all_hr.get(hz)) else "Viewing ranking"
+            status_color = "#a1a1aa" if (all_hr and not all_hr.get(hz)) else "#34d399"
+        df50 = full_df if show_all else full_df.head(50)
+        if hasattr(self,"rk_status"):
+            status_text = f"{status_base} — {len(df50)} titres" if show_all else status_base
+            self.rk_status.configure(text=status_text, text_color=status_color)
         db_path = portfolio.get_ranking_db_path() if getattr(portfolio, "get_ranking_db_path", None) else None
         if not db_path:
             try:
@@ -801,7 +809,8 @@ class AlphaRanker(ctk.CTk):
             except Exception:
                 db_path = None
         prev = portfolio.get_latest_snapshot_before()
-        history_by_ticker = {} if db_path else {t: portfolio.get_ranking_history(t, 20) for t in df50["ticker"].tolist()}
+        tickers_for_history = df50["ticker"].head(500).tolist()
+        history_by_ticker = {} if not db_path else {t: portfolio.get_ranking_history(t, 20) for t in tickers_for_history}
         display_df = add_ranking_insights(df50, prev, history_by_ticker, db_path=db_path, n_runs=10)
         # Snapshot is saved in model.run_full_pipeline / _run_simple after results, before cache
         self._rankings_display_df=display_df
@@ -842,10 +851,10 @@ class AlphaRanker(ctk.CTk):
             an={"strongBuy":"BUY++","buy":"BUY","overweight":"OW","hold":"HOLD","underweight":"UW","sell":"SELL"}.get(str(reco),"-") if _ok(reco) else "-"
             s=r.get("news_sentiment",None)
             sn="+++ Bull" if _ok(s) and s>0.3 else "+ Pos" if _ok(s) and s>0.1 else "--- Bear" if _ok(s) and s<-0.3 else "- Neg" if _ok(s) and s<-0.1 else "~ Neut" if _ok(s) else "-"
-            if ret is not None and conf>=1.8 and ret>20: tag="hot"; rd=f">> +{ret}% <<"
-            elif ret is not None and conf>=1.2 and ret>15: tag="warm"; rd=f"+{ret}%"
-            elif conf<0.5 and ret is not None: tag="cold"; rd=f"+{ret}%"
-            else: tag="normal"; rd=f"+{ret}%" if ret is not None else "—"
+            if ret is not None and conf>=1.8 and abs(ret)>=15: tag="hot"; rd=f">> +{ret}% <<" if ret>=0 else f">> {ret}% <<"
+            elif ret is not None and conf>=1.2 and abs(ret)>=10: tag="warm"; rd=f"+{ret}%" if ret>=0 else f"{ret}%"
+            elif conf<0.5 and ret is not None: tag="cold"; rd=f"+{ret}%" if ret>=0 else f"{ret}%"
+            else: tag="normal"; rd=f"+{ret}%" if ret is not None and ret>=0 else f"{ret}%" if ret is not None else "—"
             rd_delta=r.get("rank_delta"); rd_val=None
             if rd_delta is not None and (not isinstance(rd_delta,float) or rd_delta==rd_delta): rd_val=int(rd_delta)
             ch_disp=f"+{rd_val}" if rd_val is not None and rd_val>0 else str(rd_val) if rd_val is not None and rd_val!=0 else "—"
@@ -907,7 +916,7 @@ class AlphaRanker(ctk.CTk):
             si=row_series.get("stability_index"); si_str=f" (rank std: {si:.2f})" if si is not None and si==si and not (isinstance(si,float) and si!=si) else ""
             return f"Signal stability: {stab}{si_str}"
         if col_name=="return":
-            p=row_series.get("predicted_return_pct"); return f"Predicted return: {p:.1f}%" if _ok(p) else "Predicted return: —"
+            p=row_series.get("predicted_return_pct"); return f"Expected return (est.): {p:.1f}% (from historical long-short)" if _ok(p) else "Expected return (est.): —"
         if col_name=="conviction": return f"Confidence: {row_series.get('confidence',0):.2f}"
         if col_name=="rank": return f"Rank: {int(row_series.get('rank',0))}"
         if col_name=="analyst": return f"Analyst recommendation: {row_series.get('recommendation','')}"
