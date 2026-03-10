@@ -406,10 +406,15 @@ class AlphaRanker(ctk.CTk):
         strat_menu=ctk.CTkOptionMenu(fr,width=180,values=["LONG_TERM","MEDIUM_TERM","SHORT_TERM"],variable=strat_var)
         strat_menu.grid(row=2,column=1,pady=8,padx=(10,0))
         def _save():
-            try: q=float(ent["units"].get().replace(",",".")); p=float(ent["avg_price"].get().replace(",","."))
-            except: return
-            portfolio.update(hid,units=q,avg_price=p,strategy_type=strat_var.get())
-            d.destroy(); self._refresh_display()
+            try:
+                q = float(ent["units"].get().replace(",", "."))
+                p = float(ent["avg_price"].get().replace(",", "."))
+            except Exception as e:
+                logger.warning("Edit holding save failed for %s: %s", h.get("ticker"), e)
+                return
+            portfolio.update(hid, units=q, avg_price=p, strategy_type=strat_var.get())
+            d.destroy()
+            self._refresh_display()
         ctk.CTkButton(d,text="Save",width=160,height=36,font=("",12,"bold"),fg_color="#4f46e5",command=_save).pack(pady=15)
 
     def _del_holding(self):
@@ -2057,9 +2062,13 @@ class AlphaRanker(ctk.CTk):
                 def _ew(k, default, cast=int):
                     w = self._engine_widgets.get(k)
                     raw = w.get() if w else ""
-                    if not raw: return default
-                    try: return cast(raw)
-                    except: return default
+                    if not raw:
+                        return default
+                    try:
+                        return cast(raw)
+                    except Exception as e:
+                        logger.warning("Settings parse failed for %s=%r: %s", k, raw, e)
+                        return default
                 enabled = [mid for mid in _engine_cfg.MODEL_IDS if _ev("model_"+mid)]
                 vo = self._engine_vars.get("execution_mode")
                 sm = self._engine_vars.get("single_model_id")

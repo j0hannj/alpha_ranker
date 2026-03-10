@@ -1173,12 +1173,24 @@ def fetch_fundamentals(ticker, api_key=None):
         url = f"https://financialmodelingprep.com/api/v3/income-statement/{ticker}?period=quarter&limit=40&apikey={api_key}"
         with urllib.request.urlopen(url, timeout=15) as r:
             data = json.loads(r.read().decode())
-        return [{"ticker":ticker, "date":item.get("date"), "filing_date":item.get("fillingDate") or item.get("filingDate") or item.get("date"),
-                 "revenue":item.get("revenue"), "net_income":item.get("netIncome"),
-                 "eps":item.get("eps"), "ebitda":item.get("ebitda"),
-                 "gross_profit":item.get("grossProfit"), "operating_income":item.get("operatingIncome")}
-                for item in data if item.get("date")]
-    except: return []
+        return [
+            {
+                "ticker": ticker,
+                "date": item.get("date"),
+                "filing_date": item.get("fillingDate") or item.get("filingDate") or item.get("date"),
+                "revenue": item.get("revenue"),
+                "net_income": item.get("netIncome"),
+                "eps": item.get("eps"),
+                "ebitda": item.get("ebitda"),
+                "gross_profit": item.get("grossProfit"),
+                "operating_income": item.get("operatingIncome"),
+            }
+            for item in data
+            if item.get("date")
+        ]
+    except Exception as e:
+        logger.warning("fetch_fundamentals: request failed for %s: %s", ticker, e)
+        return []
 
 # ── RATIOS (FMP) ──────────────────────────────────────────────
 def fetch_ratios(ticker, api_key=None):
