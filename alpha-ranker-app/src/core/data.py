@@ -523,6 +523,7 @@ def _fetch_universe_yfinance(callback=None):
             if callback:
                 callback(f"  {etf}: {e}")
 
+    # Étendre l'univers via yfinance.Search (multi-queries, plus de résultats)
     for query in search_list:
         try:
             results = yf.Search(query)
@@ -530,7 +531,8 @@ def _fetch_universe_yfinance(callback=None):
             if quotes:
                 if not isinstance(quotes, list):
                     quotes = list(quotes)
-                for q in quotes[:30]:
+                # Prendre plus de résultats par requête pour gonfler l'univers
+                for q in quotes[:80]:
                     sym = q.get("symbol") if isinstance(q, dict) else getattr(q, "symbol", None)
                     if sym and isinstance(sym, str):
                         tickers.add(sym)
@@ -538,6 +540,40 @@ def _fetch_universe_yfinance(callback=None):
             logger.warning("yfinance Search '%s' failed: %s", query, e)
             if callback:
                 callback(f"  Search error: {e}")
+
+    # Si malgré tout l'univers est petit (<300), essayer d'utiliser yfinance.Screener si dispo
+    if len(tickers) < 300 and getattr(yf, "Screener", None):
+        try:
+            if callback:
+                callback("Using yfinance Screener for extra large caps...")
+            screener = yf.Screener()
+            body = {
+                "offset": 0,
+                "size": 500,
+                "sortField": "intradaymarketcap",
+                "sortType": "desc",
+                "quoteType": "equity",
+                "query": {
+                    "operator": "and",
+                    "operands": [
+                        {"operator": "gt", "operands": ["intradaymarketcap", 1_000_000_000]},
+                    ],
+                },
+            }
+            screener.set_default_body(body)
+            result = getattr(screener, "response", None) or {}
+            quotes = result.get("quotes", []) if isinstance(result, dict) else []
+            extra = 0
+            for q in quotes:
+                sym = (q.get("symbol") or q.get("ticker") or "").strip()
+                if sym:
+                    tickers.add(sym)
+                    extra += 1
+            if callback:
+                callback(f"  Screener added ~{extra} tickers")
+            logger.info("_fetch_universe_yfinance: Screener added %d tickers (total=%d)", extra, len(tickers))
+        except Exception as e:
+            logger.debug("_fetch_universe_yfinance: Screener fallback failed: %s", e)
 
     # 3) Fundamentals via yfinance.info for the discovered universe
     if callback:
@@ -952,8 +988,10 @@ def fetch_all_data(tickers=None, years=5, callback=None):
 
     if tickers:
         universe_tickers = sorted(set(universe_tickers + list(tickers)))
-    max_size = uv.get("max_universe_size") or 5000
-    if len(universe_tickers) > max_size:
+    # max_universe_size: si défini explicitement dans les settings, on respecte.
+    # Sinon, aucune limite artificielle côté code (seule limite = mémoire/temps yfinance).
+    max_size = uv.get("max_universe_size")
+    if isinstance(max_size, int) and max_size > 0 and len(universe_tickers) > max_size:
         universe_tickers = universe_tickers[:max_size]
         fundamentals = {t: fundamentals[t] for t in universe_tickers if t in fundamentals}
 

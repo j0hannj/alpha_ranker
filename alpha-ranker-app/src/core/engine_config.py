@@ -37,7 +37,8 @@ DEFAULT_UNIVERSE_SETTINGS = {
     "fmp_screener_limit": 3000,
     "auto_scan": True,
     "scan_frequency_hours": 24,
-    "max_universe_size": 5000,
+    # max_universe_size: None = pas de limite; peut être défini dans les settings si besoin
+    "max_universe_size": None,
     "yf_etf_tickers": ["SPY", "QQQ", "IWM", "VGK", "EFA", "EEM"],
     "yf_search_queries": [
         "large cap technology stocks",
