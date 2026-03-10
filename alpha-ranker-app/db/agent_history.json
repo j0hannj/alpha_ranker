@@ -1,14 +1,6 @@
 [
   {
     "role": "user",
-    "content": "Give me a SHORT morning market briefing in English. Include:\n1. How my portfolio is doing today (use the P&L data you have)\n2. Key market moves overnight (search news)\n3. Any news affecting my holdings specifically\n4. One actionable insight\nKeep it under 150 words. No greetings, go straight to the data."
-  },
-  {
-    "role": "assistant",
-    "content": "Portfolio today: Total value €25,348; daily P&L +€0.0 (neutral).  \nKey overnight moves: U.S. equities slipped 0.6 % on higher fed funds (4.5 %) and an inverted 10‑yr curve (slope –0.4); VIX rose to 22, oil held near $80.  \nHolding‑specific news:  \n[ACTION:search_news:AAPL]  \n[ACTION:search_news:AMZN]  \n[ACTION:search_news:AVGO]  \n[ACTION:search_news:BRK-B]  \n[ACTION:search_news:GOOG]  \n[ACTION:search_news:IONQ]  \n[ACTION:search_news:MSFT]  \n[ACTION:search_news:NVDA]  \n[ACTION:search_news:PLTR]  \nActionable insight: Trim tech exposure by adding 5 % in a defensive ETF (e.g., iShares U.S. Treasury Bond ETF) to offset potential tech drag."
-  },
-  {
-    "role": "user",
     "content": "Give me a SHORT morning market briefing in French. Include:\n1. How my portfolio is doing today (use the P&L data you have)\n2. Key market moves overnight (search news)\n3. Any news affecting my holdings specifically\n4. One actionable insight\nKeep it under 150 words. No greetings, go straight to the data."
   },
   {
@@ -150,6 +142,14 @@
   {
     "role": "assistant",
     "content": "PORTFOLIO: +868 EUR (+3,5 %). Gains dominés par IWDA.AS (+2,9 %) et VWCE.DE (+14,4 %). Tech en baisse: AAPL –2,8 %, AMZN –5,4 %, MSFT –14,5 %, PLTR –14,3 %; IONQ chute brutale –19,3 %.  \nMARCHÉ: [ACTION:search_news:European markets overnight]  \nACTUALITÉS: [ACTION:search_news:AAPL] [ACTION:search_news:AMZN] [ACTION:search_news:MSFT] [ACTION:search_news:PLTR] [ACTION:search_news:IONQ]  \nACTION: Réduisez l’exposition tech en vendant une partie de MSFT et PLTR ou en liquidant IONQ pour limiter la volatilité."
+  },
+  {
+    "role": "user",
+    "content": "Give me a SHORT morning market briefing in French. Include:\n1. How my portfolio is doing today (use the P&L data you have)\n2. Key market moves overnight (search news)\n3. Any news affecting my holdings specifically\n4. One actionable insight\nKeep it under 150 words. No greetings, go straight to the data."
+  },
+  {
+    "role": "assistant",
+    "content": "PORTFOLIO : +868 EUR (+3,5 %). Gains dominés par IWDA.AS (+2,9 %) et VWCE.DE (+14,4 %). Tech en baisse : AAPL –2,8 %, AMZN –5,4 %, MSFT –14,5 %, PLTR –14,3 %, IONQ –19,3 %.  \nMARCHÉ : [ACTION:search_news:European markets overnight]  \nACTUALITÉS : [ACTION:search_news:AAPL] [ACTION:search_news:AMZN] [ACTION:search_news:MSFT] [ACTION:search_news:PLTR] [ACTION:search_news:IONQ]  \nACTION : Réduisez l’exposition tech en vendant une partie de MSFT et PLTR ou en liquidant IONQ pour limiter la volatilité."
   },
   {
     "role": "user",
