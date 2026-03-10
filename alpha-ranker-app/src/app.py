@@ -402,11 +402,13 @@ class AlphaRanker(ctk.CTk):
             if no_model:
                 self.pf_sell_tree.pack_forget()
                 self.pf_sell_placeholder.pack(fill="x",pady=8,padx=4)
+                self._sell_signals=[]
                 return
             self.pf_sell_placeholder.pack_forget()
             self.pf_sell_tree.pack(fill="x")
             from portfolio import get_all_sell_signals
             signals=get_all_sell_signals(holdings,self.model_results,only_open=True)
+            self._sell_signals=signals
             self.pf_sell_tree.delete(*self.pf_sell_tree.get_children())
             for s in signals:
                 pr=s.get("predicted_return_pct")
@@ -430,6 +432,89 @@ class AlphaRanker(ctk.CTk):
                     reason,
                 ),tags=(tag,))
         except Exception: pass
+
+    def _accept_sell_from_selection(self):
+        sel=self.pf_sell_tree.selection()
+        if not sel or not getattr(self,"_sell_signals",None): return
+        idx=self.pf_sell_tree.index(sel[0])
+        if idx<0 or idx>=len(self._sell_signals): return
+        s=self._sell_signals[idx]
+        if s.get("signal") not in ("SELL","REVIEW"): return
+        ticker=s.get("ticker")
+        holding=None
+        for h in portfolio.get_all():
+            if h.get("ticker")==ticker: holding=h; break
+        if not holding: return
+        self._sell_dialog(holding,s)
+
+    def _sell_dialog(self,holding,signal_data):
+        d=ctk.CTkToplevel(self); d.title(f"Sell {holding['ticker']}")
+        d.geometry("420x380"); d.grab_set(); d.attributes("-topmost",True)
+        ticker=holding["ticker"]
+        ctk.CTkLabel(d,text=f"Sell {ticker}?",font=("",18,"bold")).pack(pady=(12,4))
+        reason=signal_data.get("reason") or "Model recommendation"
+        ctk.CTkLabel(d,text=reason,font=("",11),text_color="#fb923c",wraplength=380).pack(padx=15,pady=4)
+        model_note=signal_data.get("model_note","")
+        if model_note:
+            ctk.CTkLabel(d,text=model_note,font=("",10),text_color="#a1a1aa",wraplength=380).pack(padx=15,pady=2)
+        total_units=holding["units"]
+        current_price=holding.get("current_price") or holding["avg_price"]
+        cur="\u20ac" if holding.get("currency")=="EUR" else "$" if holding.get("currency")=="USD" else "\u00a3"
+        ctk.CTkLabel(d,text=f"You hold: {total_units} units @ {current_price:.2f} {cur}",font=("JetBrains Mono",11)).pack(pady=4)
+        fr=ctk.CTkFrame(d,fg_color="transparent"); fr.pack(padx=20,fill="x",pady=8)
+        sell_all_var=ctk.BooleanVar(value=True)
+        qty_entry=ctk.CTkEntry(fr,width=150,font=("JetBrains Mono",13),placeholder_text=str(total_units))
+        def _toggle(): qty_entry.configure(state="disabled" if sell_all_var.get() else "normal")
+        ctk.CTkCheckBox(fr,text="Sell all units",variable=sell_all_var,command=_toggle).pack(anchor="w")
+        ctk.CTkLabel(fr,text="Or sell quantity:",font=("",11)).pack(anchor="w",pady=(8,2))
+        qty_entry.pack(anchor="w"); qty_entry.configure(state="disabled")
+        ctk.CTkLabel(fr,text="Sell price:",font=("",11)).pack(anchor="w",pady=(8,2))
+        price_entry=ctk.CTkEntry(fr,width=150,font=("JetBrains Mono",13)); price_entry.insert(0,f"{current_price:.2f}")
+        price_entry.pack(anchor="w")
+        err=ctk.CTkLabel(d,text="",font=("",10),text_color="#f87171"); err.pack(pady=2)
+        def _execute():
+            try: sell_price=float(price_entry.get().replace(",","."))
+            except ValueError: err.configure(text="Invalid sell price"); return
+            if sell_all_var.get(): sell_qty=total_units
+            else:
+                try: sell_qty=float(qty_entry.get().replace(",","."))
+                except ValueError: err.configure(text="Invalid quantity"); return
+                if sell_qty<=0 or sell_qty>total_units:
+                    err.configure(text=f"Quantity must be between 0 and {total_units}"); return
+            self._process_sell(holding["id"],ticker,sell_qty,total_units,sell_price,holding,signal_data=signal_data,reason=reason)
+            d.destroy()
+            self._refresh_display()
+        ctk.CTkButton(d,text="Confirm Sell",width=200,height=38,font=("",13,"bold"),fg_color="#991b1b",hover_color="#7f1d1d",command=_execute).pack(pady=12)
+
+    def _process_sell(self,holding_id,ticker,sell_qty,total_units,sell_price,holding,reason=None,signal_data=None):
+        avg_price=holding["avg_price"]
+        currency=holding.get("currency","EUR")
+        pnl_realized=(sell_price-avg_price)*sell_qty
+        pnl_pct=((sell_price/avg_price)-1)*100 if avg_price>0 else 0
+        if sell_qty>=total_units:
+            portfolio.update(holding_id,status="SOLD",units=0,current_price=sell_price)
+        else:
+            portfolio.update(holding_id,units=total_units-sell_qty)
+        portfolio.log_sell_transaction(holding_id,ticker,sell_qty,sell_price,avg_price,pnl_realized,pnl_pct,currency,reason=reason,signal_data=signal_data)
+
+    def _show_trade_history(self):
+        d=ctk.CTkToplevel(self); d.title("Trade History")
+        d.geometry("720x400"); d.grab_set(); d.attributes("-topmost",True)
+        ctk.CTkLabel(d,text="Trade History",font=("",16,"bold")).pack(pady=(12,8))
+        cols=("ticker","action","units","price","total","pnl","pnl_pct","reason","date")
+        tree=ttk.Treeview(d,columns=cols,show="headings",style="T.Treeview",height=12)
+        for c,h in zip(cols,["Ticker","Action","Units","Price","Total","P&L","P&L%","Reason","Date"]):
+            tree.heading(c,text=h); tree.column(c,width=72 if c!="reason" else 180,anchor="e" if c not in ("ticker","reason","action") else "w")
+        tree.pack(fill="both",expand=True,padx=10,pady=5)
+        for r in portfolio.get_trade_history(80):
+            reason=(r.get("reason") or "—")[:24]+"…" if (r.get("reason") or "") and len((r.get("reason") or ""))>24 else (r.get("reason") or "—")
+            date_str=(r.get("executed_at") or "—")[:16] if r.get("executed_at") else "—"
+            tree.insert("","end",values=(
+                r.get("ticker",""), r.get("action","SELL"), r.get("units",0), r.get("price",0),
+                r.get("total_amount",0), r.get("pnl_realized",0), f"{r.get('pnl_pct',0):.1f}%" if r.get("pnl_pct") is not None else "—",
+                reason, date_str,
+            ))
+        ctk.CTkButton(d,text="Close",width=100,height=28,command=d.destroy).pack(pady=10)
 
     def _draw_projection(self,val):
         try:
