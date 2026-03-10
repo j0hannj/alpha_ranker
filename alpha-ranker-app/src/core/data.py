@@ -132,6 +132,7 @@ def scan_and_expand_universe(callback=None):
         callback(f"Scan complete: {len(discovered)} total, {len(new_tickers)} NEW discoveries")
 
     # Merge: known + discovered (discovered overwrites for fresh data)
+    now_iso = datetime.now().isoformat()
     full = dict(known)
     for t, info in discovered.items():
         full[t] = {
@@ -143,6 +144,7 @@ def scan_and_expand_universe(callback=None):
             "country": info.get("country"),
             "exchange": info.get("exchange"),
             "date": today,
+            "discovered_at": now_iso if t in new_tickers else known.get(t, {}).get("discovered_at"),
         }
 
     portfolio.save_universe(full)
@@ -682,18 +684,42 @@ def fetch_fx(base="EUR", targets=None, callback=None):
 
 # ── COMBINED FETCH ────────────────────────────────────────────
 def fetch_all_data(tickers=None, years=5, callback=None):
-    """Fetch all data sources in one call. Returns dict with timestamps.
+    """Fetch all data sources in one call. Scans markets to discover new stocks, then downloads prices.
     Used by run_full_pipeline to get everything needed."""
     try:
         from .api_cache import clear_older_than_days
         clear_older_than_days(30)
     except Exception as e:
         logger.debug("fetch_all_data: clear_older_than_days failed: %s", e)
-    if callback:
-        callback("Data: universe...")
-    universe_tickers, fundamentals = fetch_universe_cached(years, callback=callback)
+
+    api_key = os.environ.get("FMP_API_KEY")
+    try:
+        from .engine_config import get_universe_settings
+        uv = get_universe_settings()
+    except Exception:
+        uv = {}
+
+    if api_key and uv.get("auto_scan", True):
+        if callback:
+            callback("Scanning markets for new stocks...")
+        fundamentals = scan_and_expand_universe(callback=callback)
+        universe_tickers = list(fundamentals.keys())
+    elif api_key:
+        if callback:
+            callback("Universe: loading from DB (auto-scan off)...")
+        fundamentals = _load_known_universe_as_fundamentals()
+        universe_tickers = list(fundamentals.keys())
+    else:
+        if callback:
+            callback("FMP key required for universe. Set it in Settings.")
+        universe_tickers, fundamentals = fetch_universe_cached(years, callback=callback)
+
     if tickers:
-        universe_tickers = sorted(set(universe_tickers + tickers))
+        universe_tickers = sorted(set(universe_tickers + list(tickers)))
+    max_size = uv.get("max_universe_size") or 5000
+    if len(universe_tickers) > max_size:
+        universe_tickers = universe_tickers[:max_size]
+        fundamentals = {t: fundamentals[t] for t in universe_tickers if t in fundamentals}
 
     # Prices for the (possibly extended) universe
     import yfinance as yf
