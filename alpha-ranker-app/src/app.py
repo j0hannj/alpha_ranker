@@ -717,8 +717,14 @@ class AlphaRanker(ctk.CTk):
 
     def _upd_rankings(self):
         if self.model_results is None: return
-        hz=int(self.hz_var.get()); sc=lambda r: r if hz==12 else round(r*(hz/12)**0.75,1)
-        df50=self.model_results.head(50).copy()
+        hz=int(self.hz_var.get())
+        all_hr=getattr(self,"all_horizon_results",None) or {}
+        if all_hr and hz in all_hr:
+            df50=all_hr[hz]["results"].head(50).copy()
+        else:
+            df50=self.model_results.head(50).copy()
+            if all_hr and not all_hr.get(hz):
+                self.rk_status.configure(text=f"Horizon {hz}M: run model to generate", text_color="#a1a1aa")
         _dp=getattr(portfolio,"DB_PATH",None)
         try:
             db_path=str(_dp.resolve()) if _dp else ""
@@ -755,7 +761,7 @@ class AlphaRanker(ctk.CTk):
                 self.rk_compare_lbl.configure(text="No per-model IC (single run).",text_color="#71717a")
         self.rk_tree.delete(*self.rk_tree.get_children())
         for _,r in display_df.iterrows():
-            raw_ret=r["predicted_return_pct"]; ret=sc(raw_ret) if _ok(raw_ret) else None; conf=r.get("confidence",0)
+            raw_ret=r["predicted_return_pct"]; ret=round(raw_ret,1) if _ok(raw_ret) else None; conf=r.get("confidence",0)
             conv=_conv(conf)
             pe=f"{r['pe_forward']:.1f}" if _ok(r.get("pe_forward")) else "-"
             gr=f"{r['revenue_growth']*100:.0f}%" if _ok(r.get("revenue_growth")) else "-"
