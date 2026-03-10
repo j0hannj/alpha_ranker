@@ -40,36 +40,40 @@ def _get_data_config():
         return 2011, 15, 2500
 
 
-# ── UNIVERSE (max d'actions, 2500+ si possible) ───────────────────
+# ── UNIVERSE (tous les equity disponibles, pas de liste fixe) ─────────────
 def get_universe_tickers(callback=None):
     """
-    Retourne le max de tickers possible (objectif min_tickers depuis config).
-    FMP stock list en premier (8000+), puis indices Wikipedia. Pas de hardcoding.
+    Tous les symboles equity disponibles sur le marché. Pas de liste fixe.
+    Avec FMP: appel API stock/list → tous les titres type "stock" (milliers).
+    Sans FMP: fallback indices Wikipedia (S&P, Nasdaq, Russell). Liste minimale
+    uniquement si tout échoue (< 50 symboles).
     """
-    start_year, _, min_tickers = _get_data_config()
+    _, _, min_tickers = _get_data_config()
     tickers = []
     fmp_key = os.environ.get("FMP_API_KEY")
     if fmp_key:
         try:
             url = f"https://financialmodelingprep.com/api/v3/stock/list?apikey={fmp_key}"
-            with urllib.request.urlopen(url, timeout=30) as r:
+            with urllib.request.urlopen(url, timeout=60) as r:
                 data = json.loads(r.read().decode())
             for item in (data or []):
-                if item.get("type") != "stock":
+                if (item.get("type") or "").lower() != "stock":
                     continue
                 sym = (item.get("symbol") or "").strip()
-                if not sym or len(sym) > 8:
+                if not sym:
                     continue
                 if "." in sym:
                     sym = sym.replace(".", "-")
                 tickers.append(sym)
             tickers = list(dict.fromkeys(tickers))
             if callback:
-                callback(f"Data: univers FMP {len(tickers)} symboles (objectif {min_tickers})")
-            if len(tickers) >= min_tickers:
+                callback(f"Data: univers FMP — {len(tickers)} equity (tous disponibles, pas de liste fixe)")
+            if tickers:
                 return tickers
         except Exception:
             pass
+    if callback:
+        callback("Data: pas de clé FMP — fallback indices Wikipedia")
     try:
         tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
         tickers.extend(tables[0]["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist())
@@ -99,8 +103,10 @@ def get_universe_tickers(callback=None):
         pass
     tickers = list(dict.fromkeys(tickers))
     if callback:
-        callback(f"Data: univers {len(tickers)} symboles (indices)")
-    if len(tickers) < 100:
+        callback(f"Data: univers indices — {len(tickers)} symboles")
+    if len(tickers) < 50:
+        if callback:
+            callback("Data: liste minimale (fallback, pas de FMP)")
         tickers = ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","BRK-B","JPM","V","UNH","XOM","JNJ","WMT","PG","MA","HD","CVX","MRK","ABBV","LLY","PEP","KO","COST","AVGO","TMO","MCD","ACN","CSCO","ABT","NEE","TXN","RTX","LOW","HON","AMGN","IBM","CAT","BA","GS","BLK","SPGI","AXP","DE","ISRG","REGN","VRTX","GILD","SYK","BKNG","CB","PLD","CI","CME","SHW","FCX","COP","EOG","SLB","HAL","LMT","GD","NOC","CRWD","PANW","PLTR","NET","DDOG","RKLB","HII"]
     return tickers
 
