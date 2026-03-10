@@ -27,7 +27,7 @@ CACHE_DIR = Path(__file__).parent.parent.parent / "db"
 CACHE_DIR.mkdir(exist_ok=True)
 
 # ── UNIVERSE ──────────────────────────────────────────────────
-def fetch_universe(years=5):
+def fetch_universe(years=5, callback=None):
     """Fetch S&P 500 universe + extras. Cached in SQLite 24h. Returns (tickers, prices_df, fundamentals_dict)."""
     try:
         from .api_cache import get, set
@@ -40,12 +40,14 @@ def fetch_universe(years=5):
                 try:
                     prices = pd.read_json(prices_json, orient="split")
                     prices = prices.sort_index()
+                    if callback: callback(f"Universe: cache hit ({len(tickers)} tickers)")
                     return tickers, prices, fundamentals
                 except Exception:
                     pass
     except Exception:
         pass
     import yfinance as yf
+    if callback: callback(f"Universe: downloading prices ({years}y)...")
     tickers = []
     try:
         tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
@@ -65,8 +67,11 @@ def fetch_universe(years=5):
     prices = yf.download(tickers, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"),
                          group_by="ticker", auto_adjust=True, threads=True)
     fundamentals = {}
-    for t in tickers:
+    n_t = len(tickers)
+    for i, t in enumerate(tickers):
         try:
+            if callback and (i+1) % 50 == 0:
+                callback(f"Universe: info {i+1}/{n_t}...")
             info = yf.Ticker(t).info
             if not info or "marketCap" not in info: continue
             fundamentals[t] = {
@@ -156,15 +161,17 @@ def fetch_ratios(ticker, api_key=None):
     return results
 
 # ── MACRO (FRED) ──────────────────────────────────────────────
-def fetch_macro():
+def fetch_macro(callback=None):
     """Fetch macro indicators from FRED. Cached in SQLite 24h."""
     try:
         from .api_cache import get, set
         cached = get("fred", "macro", max_age_hours=24)
         if cached is not None:
+            if callback: callback("Macro: cache hit")
             return cached
     except Exception:
         pass
+    if callback: callback("Macro: fetching FRED...")
     fallback = {"date":datetime.now().strftime("%Y-%m-%d"),
                 "fed_funds_rate":4.5,"us_10y_yield":4.1,"yield_curve_slope":-0.4,
                 "cpi_yoy":3.0,"oil_price":80,"vix":22,"credit_spread":1.5}
@@ -191,7 +198,7 @@ def fetch_macro():
     except: return fallback
 
 # ── FX (exchangerate.host + yfinance fallback) ────────────────
-def fetch_fx(base="EUR", targets=None):
+def fetch_fx(base="EUR", targets=None, callback=None):
     """Fetch FX rates. Cached in SQLite 24h."""
     if targets is None: targets = ["USD","GBP","CHF"]
     cache_key = f"{base}_{'_'.join(sorted(targets))}"
@@ -199,9 +206,11 @@ def fetch_fx(base="EUR", targets=None):
         from .api_cache import get, set
         cached = get("fx", cache_key, max_age_hours=24)
         if cached is not None:
+            if callback: callback("FX: cache hit")
             return cached
     except Exception:
         pass
+    if callback: callback("FX: fetching rates...")
     rates = {"date": datetime.now().strftime("%Y-%m-%d"), "base": base}
     try:
         url = f"https://api.exchangerate.host/latest?base={base}&symbols={','.join(targets)}"
@@ -237,22 +246,26 @@ def fetch_all_data(tickers=None, years=5, callback=None):
         clear_older_than_days(30)
     except Exception:
         pass
-    if callback: callback("Fetching universe...")
-    universe_tickers, prices, fundamentals = fetch_universe(years)
+    if callback: callback("Data: universe...")
+    universe_tickers, prices, fundamentals = fetch_universe(years, callback=callback)
     if tickers: universe_tickers = list(set(universe_tickers + tickers))
 
-    if callback: callback("Fetching macro...")
-    macro = fetch_macro()
+    if callback: callback("Data: macro...")
+    macro = fetch_macro(callback=callback)
 
-    if callback: callback("Fetching FX...")
-    fx = fetch_fx()
+    if callback: callback("Data: FX...")
+    fx = fetch_fx(callback=callback)
 
-    if callback: callback("Fetching news sentiment...")
+    if callback: callback("Data: sentiment...")
     sentiment = {}
     try:
         from .news import batch_sentiment
         sentiment = batch_sentiment(list(fundamentals.keys())[:150], callback)
     except: pass
+
+    if callback:
+        n_t, n_f = len(universe_tickers), len(fundamentals)
+        callback(f"Data done: {n_t} tickers | {n_f} fundamentals | sentiment {len(sentiment)}")
 
     now_iso = datetime.now().isoformat()
     now_display = datetime.now().strftime("%Y-%m-%d %H:%M")
