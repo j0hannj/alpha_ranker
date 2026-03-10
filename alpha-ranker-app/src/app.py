@@ -1586,14 +1586,19 @@ class AlphaRanker(ctk.CTk):
             fmp_key = getattr(portfolio, "get_setting", None) and portfolio.get_setting("fmp_key")
             if fmp_key:
                 os.environ["FMP_API_KEY"] = fmp_key
-        except Exception:
-            pass
+                logger.info("_on_auto_fill_clicked: FMP_API_KEY loaded from settings")
+            else:
+                logger.warning("_on_auto_fill_clicked: no FMP key in settings")
+        except Exception as e:
+            logger.warning("_on_auto_fill_clicked: failed to load FMP key: %s", e)
         # 2) Lire la taille actuelle de l'univers (avant scan)
         try:
             from core import portfolio as _pf
             before_universe = _pf.get_universe() or {}
             before_n = len(before_universe)
-        except Exception:
+            logger.info("_on_auto_fill_clicked: universe size before scan = %d", before_n)
+        except Exception as e:
+            logger.warning("_on_auto_fill_clicked: failed to load universe before scan: %s", e)
             before_n = 0
         # UI: état "en cours"
         self._btn_auto_fill.configure(state="disabled")
@@ -1608,13 +1613,24 @@ class AlphaRanker(ctk.CTk):
             def _update():
                 self._universe_status_lbl.configure(text=str(msg)[:85])
             self.after(0, _update)
+            try:
+                logger.info("Auto-fill scan status: %s", msg)
+            except Exception:
+                pass
 
         def worker():
             try:
                 from core import data as core_data
+                logger.info("_on_auto_fill_clicked: starting scan_and_expand_universe() worker")
                 universe = core_data.scan_and_expand_universe(callback=scan_cb) or {}
                 after_n = len(universe)
                 added_n = max(0, after_n - before_n)
+                logger.info(
+                    "_on_auto_fill_clicked: scan done. before=%d after=%d added=%d",
+                    before_n,
+                    after_n,
+                    added_n,
+                )
                 result = {
                     "added": list(universe.keys())[-added_n:] if added_n > 0 else [],
                     "failed": [],
@@ -1624,6 +1640,7 @@ class AlphaRanker(ctk.CTk):
                 }
             except Exception as e:
                 err = str(e)
+                logger.warning("_on_auto_fill_clicked: scan failed: %s", err)
                 def _err():
                     messagebox.showerror("Auto-Fill", f"Erreur pendant le scan: {err}")
                 self.after(0, _err)
