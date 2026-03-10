@@ -86,7 +86,8 @@ DEFAULT_MODEL_SETTINGS = {
     "horizons": [3, 6, 12, 24, 120],
     "primary_horizon": 12,
     "lookback_days": 252,
-    "training_window_years": 3,
+    # Training window par défaut: 15 ans pour exploiter un maximum d'historique
+    "training_window_years": 15,
     "retraining_frequency_months": 3,
     "n_estimators": 500,
     "max_depth": 5,

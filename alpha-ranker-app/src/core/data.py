@@ -45,6 +45,7 @@ def _get_data_config():
 
 
 UNIVERSE_CACHE = CACHE_DIR / "universe_cache.json"
+PRICES_CACHE = CACHE_DIR / "prices.parquet"
 
 
 def _read_html_with_headers(url: str):
@@ -1229,6 +1230,13 @@ def fetch_all_data(tickers=None, years=5, callback=None):
         auto_adjust=True,
         threads=True,
     )
+
+    # Stocker l'historique des prix (pour 15 ans max) dans un cache parquet
+    try:
+        if prices is not None and hasattr(prices, "to_parquet"):
+            prices.to_parquet(PRICES_CACHE)
+    except Exception as e:
+        logger.warning("fetch_all_data: failed to persist prices cache: %s", e)
 
     if callback: callback("Data: macro...")
     macro = fetch_macro(callback=callback)
