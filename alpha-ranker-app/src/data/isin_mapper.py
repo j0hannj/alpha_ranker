@@ -7,7 +7,7 @@ This module sits on top of `core.isin` and exposes a clean, reusable API:
 - map_ticker_to_isin(ticker) -> isin or None (multi-source chain)
 - resolve_asset_identifier(raw_id) -> dict with ticker/isin/exchange
 
-Ticker -> ISIN uses a resolution chain: local_cache -> static_file -> OpenFIGI -> yfinance.
+Ticker -> ISIN uses a resolution chain: local_cache -> static_file -> FMP (if key) -> yfinance.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def map_isin_to_ticker(isin: str) -> Optional[str]:
 def map_ticker_to_isin(ticker: str) -> Optional[str]:
     """
     Resolve ticker to ISIN via multi-source chain:
-    local_cache (SQLite) -> static_isins.csv -> OpenFIGI -> yfinance.
+    local_cache (SQLite) -> static_isins.csv -> FMP -> yfinance.
     Results are persisted to the shared cache.
     """
     if _resolve_ticker_to_isin:

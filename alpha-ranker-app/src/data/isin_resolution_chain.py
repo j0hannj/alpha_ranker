@@ -1,8 +1,8 @@
 """
 Multi-source ISIN resolution chain: ticker -> ISIN.
 
-Priority: local_cache (SQLite) -> static_isins.csv -> OpenFIGI -> yfinance.
-Persistent cache via core.api_cache isin_map. Ticker normalization for better matches.
+Priority: local_cache (SQLite) -> static_isins.csv -> FMP (if key) -> yfinance.
+OpenFIGI was removed (it returns FIGI only, not ISIN). Persistent cache via core.api_cache.
 """
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ EXCHANGE_SUFFIXES = {
 }
 
 STATIC_ISINS_PATH = Path(__file__).parent.parent.parent / "db" / "static_isins.csv"
-OPENFIGI_URL = "https://api.openfigi.com/v3/mapping"
-RESOLUTION_CHAIN = ["local_cache", "static_file", "openfigi", "yahoo_finance"]
+# OpenFIGI /v3/mapping returns FIGI only, not ISIN — removed from chain (was dead)
+RESOLUTION_CHAIN = ["local_cache", "static_file", "fmp", "yahoo_finance"]
 
 
 def normalize_ticker(yahoo_ticker: str) -> Tuple[str, Optional[str]]:
@@ -54,6 +54,7 @@ def _load_static_isins() -> Dict[str, str]:
     """Load ticker->ISIN from db/static_isins.csv. Returns dict."""
     out = {}
     if not STATIC_ISINS_PATH.exists():
+        logger.warning("Static ISIN file missing: %s — add ticker,isin,exchange,name for better coverage", STATIC_ISINS_PATH)
         return out
     try:
         with open(STATIC_ISINS_PATH, encoding="utf-8") as f:
@@ -109,45 +110,66 @@ def _resolve_from_static(ticker: str, clean: str) -> Optional[str]:
     return m.get(ticker.upper()) or m.get(clean.upper())
 
 
-def _resolve_from_openfigi(ticker: str, clean: str, exchange: Optional[str]) -> Optional[str]:
-    """OpenFIGI mapping: TICKER -> response. Response may contain identifiers."""
+def _resolve_from_fmp(ticker: str, clean: str) -> Optional[str]:
+    """Resolve ISIN via FMP API (search or profile). Returns ISIN if FMP_API_KEY is set."""
+    import os
+    api_key = os.environ.get("FMP_API_KEY", "").strip()
+    if not api_key:
+        return None
     try:
         import urllib.request
-        jobs = [{"idType": "TICKER", "idValue": clean or ticker}]
-        if exchange:
-            jobs[0]["exchCode"] = exchange
-        payload = json.dumps(jobs).encode("utf-8")
-        req = urllib.request.Request(
-            OPENFIGI_URL,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        api_key = __import__("os").environ.get("OPENFIGI_API_KEY")
-        if api_key:
-            req.add_header("X-OPENFIGI-APIKEY", api_key)
-        with urllib.request.urlopen(req, timeout=12) as r:
+        # FMP /v3/search returns isin in results; /v3/profile also has isin
+        query = (clean or ticker).strip()
+        url = f"https://financialmodelingprep.com/api/v3/search?query={query}&limit=5&apikey={api_key}"
+        req = urllib.request.Request(url, headers={"User-Agent": "AlphaRanker/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode())
-        if not data or not isinstance(data, list) or not data[0].get("data"):
+        if not data or not isinstance(data, list):
             return None
-        for item in data[0]["data"]:
-            # OpenFIGI sometimes returns isin in metadata; check common keys
-            isin = item.get("isin") or item.get("ISIN") or item.get("idValue") if isinstance(item.get("idType"), str) and (item.get("idType") or "").upper() == "ID_ISIN" else None
-            if isin and len(str(isin)) >= 10:
-                return str(isin).strip().upper()
-        return None
+        qnorm = (query or "").replace(".", "-").strip().upper()
+        for item in data:
+            sym = (item.get("symbol") or "").strip().upper().replace(".", "-")
+            if sym != qnorm:
+                continue
+            isin = (item.get("isin") or item.get("ISIN") or "").strip()
+            if isin and len(isin) >= 10:
+                return isin.upper()
+        # Fallback: profile endpoint often has isin
+        url2 = f"https://financialmodelingprep.com/api/v3/profile/{query}?apikey={api_key}"
+        req2 = urllib.request.Request(url2, headers={"User-Agent": "AlphaRanker/1.0"})
+        with urllib.request.urlopen(req2, timeout=10) as r2:
+            data2 = json.loads(r2.read().decode())
+        if data2 and isinstance(data2, list) and data2:
+            isin = (data2[0].get("isin") or data2[0].get("ISIN") or "").strip()
+            if isin and len(isin) >= 10:
+                return isin.upper()
     except Exception as e:
-        logger.debug("OpenFIGI lookup failed for %s: %s", ticker, e)
-        return None
+        logger.debug("FMP ISIN lookup failed for %s: %s", ticker, e)
+    return None
 
 
 def _resolve_from_yfinance(ticker: str) -> Optional[str]:
+    """Resolve ISIN via yfinance. Prefer .isin property (correct); fallback to .info."""
     try:
         import yfinance as yf
-        info = yf.Ticker(ticker).info
-        isin = (info.get("isin") or info.get("ISIN") or "").strip()
-        if isin and len(isin) >= 10 and isin != "-":
-            return isin.upper()
+        t = yf.Ticker(ticker)
+        # Method 1: .isin property (the correct way — not in .info)
+        try:
+            isin_val = getattr(t, "isin", None)
+            if isin_val and isinstance(isin_val, str):
+                isin = isin_val.strip()
+                if len(isin) >= 10 and isin != "-":
+                    return isin.upper()
+        except Exception:
+            pass
+        # Method 2: fallback via .info (rarely present)
+        try:
+            info = getattr(t, "info", None) or {}
+            isin = (info.get("isin") or info.get("ISIN") or "").strip()
+            if isin and len(isin) >= 10 and isin != "-":
+                return isin.upper()
+        except Exception:
+            pass
     except Exception:
         pass
     return None
@@ -176,8 +198,8 @@ def resolve_ticker_to_isin(ticker: str, use_chain: bool = True) -> Optional[str]
             _persist_isin(ticker, isin)
             return isin
 
-        # 3. OpenFIGI (may not return ISIN; try anyway)
-        isin = _resolve_from_openfigi(ticker, clean_u, exchange)
+        # 3. FMP API (returns ISIN if FMP_API_KEY set)
+        isin = _resolve_from_fmp(ticker, clean_u)
         if isin:
             _persist_isin(ticker, isin)
             return isin
@@ -218,10 +240,10 @@ def resolve_ticker_to_isin_with_source(ticker: str) -> Tuple[Optional[str], str]
         _persist_isin(ticker, isin)
         return (isin, "static_file")
 
-    isin = _resolve_from_openfigi(ticker, clean_u, exchange)
+    isin = _resolve_from_fmp(ticker, clean_u)
     if isin:
         _persist_isin(ticker, isin)
-        return (isin, "openfigi")
+        return (isin, "fmp")
 
     isin = _resolve_from_yfinance(ticker)
     if isin:
