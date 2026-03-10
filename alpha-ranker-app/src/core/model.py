@@ -987,6 +987,10 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     else:
         df["expected_return_estimate_pct"] = np.nan
         df["predicted_return_pct"] = 0.0  # do not show raw score as return
+        logger.debug(
+            "predict_current: alpha_spread=%s (None or <=0) -> predicted_return_pct=0 (no scaling)",
+            alpha_spread,
+        )
 
     # Confidence = z-score of raw alpha (relative conviction)
     med, std = np.median(preds), np.std(preds)
@@ -1807,6 +1811,13 @@ def run_full_pipeline(callback=None):
                 if single_id and single_id in final_models:
                     final_models = {single_id: final_models[single_id]}
             alpha_spread = oos_metrics.get("mean_ls_return")
+            if alpha_spread is None or float(alpha_spread) <= 0:
+                logger.warning(
+                    "predict_current: alpha_spread=%s (from oos mean_ls_return) -> predicted_return_pct will be 0 (need mean_ls_return > 0 from OOS long-short)",
+                    alpha_spread,
+                )
+            else:
+                logger.info("predict_current: alpha_spread=%.4f (from oos mean_ls_return) -> scaling alpha score to expected return pct", float(alpha_spread))
             results_h, blend = predict_current(
                 final_models, medians, feat_cols, prices, fund_db, macro, sector_map, list(yf_fund.keys()),
                 yf_info=yf_fund, callback=callback, config=config_h, as_of_date=as_of_date,
