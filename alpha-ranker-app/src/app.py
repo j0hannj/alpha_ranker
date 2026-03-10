@@ -10,7 +10,7 @@ from tkinter import ttk, messagebox
 import tkinter as tk
 from core import portfolio, data, model, agent
 from core.ranking_insights import add_ranking_insights
-from core.api_cache import get_isin_map, get_display_id
+from core.api_cache import get_isin_map, get_display_id, get_stored_universe_list
 from core.ollama_setup import (is_ollama_installed, is_ollama_running,
                                 full_setup as ollama_full_setup, MODELS as OLLAMA_MODELS)
 try:
@@ -1427,15 +1427,30 @@ class AlphaRanker(ctk.CTk):
     # ── UNIVERSE TAB (tickers connus + historique au clic) ──────
     def _init_universe(self):
         tab=self.tabs.tab("Universe"); tab.grid_columnconfigure(0,weight=0); tab.grid_columnconfigure(1,weight=1)
-        tab.grid_rowconfigure(1,weight=1)
+        tab.grid_rowconfigure(2,weight=1)
         top=ctk.CTkFrame(tab,fg_color="transparent"); top.grid(row=0,column=0,columnspan=2,sticky="ew",pady=(0,6))
         top.grid_columnconfigure(0,weight=1)
         ctk.CTkLabel(top,text="Universe — Tickers connus",font=("",14,"bold")).pack(side="left")
         ctk.CTkButton(top,text="Actualiser la liste",width=120,height=28,font=("",10),fg_color="#27272a",
                       command=self._universe_refresh).pack(side="right",padx=4)
         self._universe_count_lbl=ctk.CTkLabel(top,text="",font=("",10),text_color="#71717a"); self._universe_count_lbl.pack(side="right")
+        # Auto-fill toolbar (target + button + progress)
+        autofill=ctk.CTkFrame(tab,fg_color="transparent"); autofill.grid(row=1,column=0,columnspan=2,sticky="ew",pady=(0,6))
+        autofill.grid_columnconfigure(1,weight=1)
+        ctk.CTkLabel(autofill,text="Cible:",font=("",10),text_color="#a1a1aa").grid(row=0,column=0,padx=(0,4),pady=2)
+        default_target=500
+        if _engine_cfg and getattr(_engine_cfg,"DEFAULT_DATA_SETTINGS",None):
+            default_target=_engine_cfg.DEFAULT_DATA_SETTINGS.get("data_min_tickers",500) or 500
+        self._universe_target_entry=ctk.CTkEntry(autofill,width=80,height=28,font=("",10),placeholder_text="500")
+        self._universe_target_entry.insert(0,str(default_target)); self._universe_target_entry.grid(row=0,column=1,padx=(0,8),pady=2,sticky="w")
+        self._btn_auto_fill=ctk.CTkButton(autofill,text="Remplir automatiquement",width=180,height=28,font=("",10),fg_color="#4f46e5",command=self._on_auto_fill_clicked)
+        self._btn_auto_fill.grid(row=0,column=2,padx=4,pady=2)
+        self._universe_progress=ctk.CTkProgressBar(autofill,width=200,height=8); self._universe_progress.grid(row=0,column=3,padx=8,pady=2); self._universe_progress.grid_remove()
+        self._universe_status_lbl=ctk.CTkLabel(autofill,text="",font=("",9),text_color="#71717a"); self._universe_status_lbl.grid(row=0,column=4,padx=4,pady=2); self._universe_status_lbl.grid_remove()
+        self._btn_auto_fill_cancel=ctk.CTkButton(autofill,text="Annuler",width=80,height=28,font=("",10),fg_color="#7f1d1d",command=self._on_auto_fill_cancel); self._btn_auto_fill_cancel.grid(row=0,column=5,padx=4,pady=2); self._btn_auto_fill_cancel.grid_remove()
+        self._universe_auto_fill_cancel_event=None
         # Left: list of tickers (Treeview)
-        left=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8,width=220); left.grid(row=1,column=0,sticky="nsew",padx=(0,4),pady=0)
+        left=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8,width=220); left.grid(row=2,column=0,sticky="nsew",padx=(0,4),pady=0)
         left.grid_propagate(False)
         left.grid_rowconfigure(1,weight=1); left.grid_columnconfigure(0,weight=1)
         ctk.CTkLabel(left,text="ISIN / Ticker",font=("",10,"bold"),text_color="#a1a1aa").grid(row=0,column=0,sticky="ew",padx=6,pady=4)
@@ -1444,7 +1459,7 @@ class AlphaRanker(ctk.CTk):
         self._universe_tree.grid(row=1,column=0,sticky="nsew",padx=4,pady=(0,4))
         if self._universe_sb: self._universe_sb.grid(row=1,column=1,sticky="ns",pady=(0,4))
         # Right: chart area
-        self._universe_chart=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8); self._universe_chart.grid(row=1,column=1,sticky="nsew",padx=4,pady=0)
+        self._universe_chart=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8); self._universe_chart.grid(row=2,column=1,sticky="nsew",padx=4,pady=0)
         self._universe_chart.grid_columnconfigure(0,weight=1); self._universe_chart.grid_rowconfigure(0,weight=1)
         ctk.CTkLabel(self._universe_chart,text="Cliquez sur un titre (ISIN/Ticker) pour afficher l'historique des prix",
                      text_color="#52525b",font=("",11)).pack(pady=40)
@@ -1477,6 +1492,57 @@ class AlphaRanker(ctk.CTk):
 
     def _universe_refresh(self):
         self._universe_fill_tickers()
+
+    def _on_auto_fill_clicked(self):
+        try:
+            target_str=self._universe_target_entry.get().strip() or "500"
+            target=int(target_str)
+        except ValueError:
+            target=500
+        try:
+            from core.api_cache import get_isin_map
+            tickers=get_stored_universe_list()
+            imap=get_isin_map()
+            current_valid=sum(1 for t in tickers if imap.get(t))
+        except Exception:
+            current_valid=0
+        if current_valid>=target:
+            messagebox.showinfo("Auto-Fill",f"L'univers atteint déjà la cible ({current_valid}/{target}).")
+            return
+        self._btn_auto_fill.configure(state="disabled")
+        self._universe_progress.set(0); self._universe_progress.grid(); self._universe_status_lbl.grid(); self._universe_status_lbl.configure(text="Préparation…")
+        self._btn_auto_fill_cancel.grid()
+        self._universe_auto_fill_cancel_event=threading.Event()
+        result_holder=[]
+        def progress_cb(current,total,msg):
+            def _update():
+                if total>0:
+                    self._universe_progress.set(current/total)
+                self._universe_status_lbl.configure(text=f"Ajout en cours… {current}/{total} — {msg}")
+            self.after(0,_update)
+        def worker():
+            from data.universe_builder import auto_fill_universe
+            r=auto_fill_universe(target_count=target,progress_callback=progress_cb,cancel_event=self._universe_auto_fill_cancel_event)
+            result_holder.append(r)
+            self.after(0,lambda:self._on_auto_fill_complete(r))
+        threading.Thread(target=worker,daemon=True).start()
+
+    def _on_auto_fill_cancel(self):
+        if getattr(self,"_universe_auto_fill_cancel_event",None):
+            self._universe_auto_fill_cancel_event.set()
+
+    def _on_auto_fill_complete(self,result):
+        self._btn_auto_fill.configure(state="normal")
+        self._universe_progress.grid_remove(); self._universe_status_lbl.grid_remove(); self._btn_auto_fill_cancel.grid_remove()
+        self._universe_fill_tickers()
+        target_str=self._universe_target_entry.get().strip() or "500"
+        try: target=int(target_str)
+        except ValueError: target=500
+        added=len(result.get("added",[])); failed=len(result.get("failed",[])); size=result.get("universe_size",0); reached=result.get("target_reached",False)
+        msg=f"Auto-fill terminé:\n  - Ajoutés: {added} actions\n  - Échec ISIN: {failed} (ignorés)\n  - Taille univers: {size}/{target}"
+        if reached: msg+=" ✓"
+        else: msg+="\n  ⚠ Cible non atteinte — sources épuisées"
+        messagebox.showinfo("Auto-Fill",msg)
 
     def _universe_on_select(self,ev):
         sel=self._universe_tree.selection()
