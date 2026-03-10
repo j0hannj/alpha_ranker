@@ -49,6 +49,9 @@ DEFAULT_UNIVERSE_SETTINGS = {
         "large cap industrial stocks",
         "European large cap stocks",
     ],
+    # Queries pour l'agent web (recherche libre sur le web)
+    "ai_web_enabled": False,
+    "ai_web_queries": [],
 }
 
 # Data fetch: historique année par année, reprise possible

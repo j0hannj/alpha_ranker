@@ -306,6 +306,109 @@ def _enrich_with_yfinance(tickers_to_enrich, callback=None):
     return enriched
 
 
+def _discover_from_ai_web_search(queries, max_per_query=30, callback=None):
+    """
+    Découverte via recherche web (agent IA léger).
+
+    Implémentation simple:
+    - utilise DuckDuckGo HTML comme source publique,
+    - extrait des séquences type TICKER (AAPL, MSFT, BMW.DE, etc.),
+    - valide chaque candidat via yfinance.Ticker(symbol).info,
+    - renvoie uniquement les tickers avec un marketCap valide.
+    """
+    import re
+    import time as _time
+    import urllib.parse
+    import urllib.request
+    import yfinance as yf
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+
+    discovered: dict[str, dict] = {}
+    # Réutiliser le même set que pour le nettoyage global
+    garbage = {
+        "EUROPE",
+        "OTHER",
+        "COMMODITIES",
+        "METALS",
+        "CONSUMER",
+        "ENERGY",
+        "FINANCIALS",
+        "HEALTHCARE",
+        "INDUSTRIALS",
+        "MATERIALS",
+        "TECHNOLOGY",
+        "UTILITIES",
+        "TELECOM",
+        "SERVICES",
+        "TRANSPORT",
+        "TOTAL",
+        "INDEX",
+        "VARIOUS",
+        "SECTOR",
+        "BASIC",
+        "CAPITAL",
+        "GOODS",
+        "FOOD",
+    }
+
+    for query in queries or []:
+        try:
+            if callback:
+                callback(f"AI web: searching '{query}'...")
+            url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote(query + " stock ticker")
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                html = r.read().decode("utf-8", errors="ignore")
+            # Tokens candidats: 1-5 lettres majuscules + éventuellement .SUFFIX
+            candidates = set(re.findall(r"\\b[A-Z]{1,5}(?:\\.[A-Z]{1,4})?\\b", html))
+            validated = 0
+            for sym in sorted(candidates):
+                base = sym.split(".")[0].upper()
+                if base in garbage:
+                    continue
+                if len(sym) > 12:
+                    continue
+                if sym in discovered:
+                    continue
+                try:
+                    info = yf.Ticker(sym).info
+                    if not info or not info.get("marketCap"):
+                        continue
+                    discovered[sym] = {
+                        "shortName": info.get("shortName"),
+                        "sector": info.get("sector"),
+                        "industry": info.get("industry"),
+                        "marketCap": info.get("marketCap"),
+                        "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
+                        "country": info.get("country"),
+                        "exchange": info.get("exchange"),
+                        "source": "ai_web",
+                    }
+                    validated += 1
+                    if validated >= max_per_query:
+                        break
+                except Exception as e:
+                    logger.debug("AI web: validation for %s failed: %s", sym, e)
+                _time.sleep(0.2)
+            if callback:
+                callback(f"  AI web '{query}': +{validated} tickers")
+        except Exception as e:
+            logger.warning("AI web: search for '%s' failed: %s", query, e)
+            if callback:
+                callback(f"  AI web search error for '{query}': {e}")
+
+    if callback:
+        callback(f"AI web total: {len(discovered)} tickers")
+    return discovered
+
+
 def _discover_from_fmp_search(callback=None):
     """Découverte via FMP /api/v3/search (gratuit) – actuellement souvent 403.
 
@@ -499,13 +602,21 @@ def scan_and_expand_universe(callback=None):
         cleaned[sym] = info
     discovered = cleaned
 
-    # 4) (FMP search désactivé par défaut, API retourne 403)
+    # 4) Agent web (facultatif, paramétré dans universe_settings.ai_web_queries)
+    ai_queries = uv.get("ai_web_queries") or []
+    if uv.get("ai_web_enabled", False) and ai_queries:
+        ai_found = _discover_from_ai_web_search(ai_queries, callback=callback)
+        for k, v in ai_found.items():
+            if k not in discovered:
+                discovered[k] = v
+
+    # 5) (FMP search désactivé par défaut, API retourne 403)
     #    On n'appelle plus _discover_from_fmp_search() ici.
     if callback:
         callback(f"Total discovered (raw): {len(discovered)} unique tickers")
     logger.info("scan_and_expand_universe: total discovered (raw)=%d", len(discovered))
 
-    # 5) Merge avec univers connu, enrichir ensuite via yfinance (FMP profile → 403)
+    # 6) Merge avec univers connu, enrichir ensuite via yfinance (FMP profile → 403)
     known = portfolio.get_universe() or {}
     known_set = set(known.keys())
     new_tickers = set(discovered.keys()) - known_set
@@ -553,7 +664,7 @@ def scan_and_expand_universe(callback=None):
         logger.warning("scan_and_expand_universe: failed to persist universe_last_scan: %s", e)
     logger.info("scan_and_expand_universe: end")
 
-    # 6) Univers ACTIF filtré par market cap
+    # 7) Univers ACTIF filtré par market cap
     active = {
         t: {
             "shortName": info.get("shortName") or t,
