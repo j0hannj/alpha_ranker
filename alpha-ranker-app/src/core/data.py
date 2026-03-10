@@ -26,74 +26,188 @@ except ImportError:
 CACHE_DIR = Path(__file__).parent.parent.parent / "db"
 CACHE_DIR.mkdir(exist_ok=True)
 
-# ── UNIVERSE ──────────────────────────────────────────────────
-def fetch_universe(years=5, callback=None):
-    """Fetch S&P 500 universe + extras. Cached in SQLite 24h. Returns (tickers, prices_df, fundamentals_dict)."""
+# ── CONFIG (sans hardcoding) ───────────────────────────────────
+def _get_data_config():
+    """Start year, max years, min tickers depuis la config."""
     try:
-        from .api_cache import get, set
-        cached = get("yahoo_universe", str(years), max_age_hours=24)
-        if cached is not None and isinstance(cached, dict):
-            tickers = cached.get("tickers")
-            fundamentals = cached.get("fundamentals", {})
-            prices_json = cached.get("prices_json")
-            if tickers and prices_json is not None:
-                try:
-                    prices = pd.read_json(prices_json, orient="split")
-                    prices = prices.sort_index()
-                    if callback: callback(f"Universe: cache hit ({len(tickers)} tickers)")
-                    return tickers, prices, fundamentals
-                except Exception:
-                    pass
+        from .engine_config import get_data_settings
+        cfg = get_data_settings()
+        start = int(cfg.get("data_start_year", 2011))
+        max_y = int(cfg.get("data_max_history_years", 15))
+        min_t = int(cfg.get("data_min_tickers", 2500))
+        return start, max_y, min_t
     except Exception:
-        pass
-    import yfinance as yf
-    if callback: callback(f"Universe: downloading prices ({years}y)...")
+        return 2011, 15, 2500
+
+
+# ── UNIVERSE (max d'actions, 2500+ si possible) ───────────────────
+def get_universe_tickers(callback=None):
+    """
+    Retourne le max de tickers possible (objectif min_tickers depuis config).
+    FMP stock list en premier (8000+), puis indices Wikipedia. Pas de hardcoding.
+    """
+    start_year, _, min_tickers = _get_data_config()
     tickers = []
+    fmp_key = os.environ.get("FMP_API_KEY")
+    if fmp_key:
+        try:
+            url = f"https://financialmodelingprep.com/api/v3/stock/list?apikey={fmp_key}"
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = json.loads(r.read().decode())
+            for item in (data or []):
+                if item.get("type") != "stock":
+                    continue
+                sym = (item.get("symbol") or "").strip()
+                if not sym or len(sym) > 8:
+                    continue
+                if "." in sym:
+                    sym = sym.replace(".", "-")
+                tickers.append(sym)
+            tickers = list(dict.fromkeys(tickers))
+            if callback:
+                callback(f"Data: univers FMP {len(tickers)} symboles (objectif {min_tickers})")
+            if len(tickers) >= min_tickers:
+                return tickers
+        except Exception:
+            pass
     try:
         tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-        tickers = tables[0]["Symbol"].str.replace(".","-",regex=False).tolist()
-    except: pass
-    if len(tickers) < 100:
-        tickers = ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","BRK-B","JPM","V","UNH",
-                   "XOM","JNJ","WMT","PG","MA","HD","CVX","MRK","ABBV","LLY","PEP","KO","COST",
-                   "AVGO","TMO","MCD","ACN","CSCO","ABT","NEE","TXN","RTX","LOW","HON","AMGN",
-                   "IBM","CAT","BA","GS","BLK","SPGI","AXP","DE","ISRG","REGN","VRTX","GILD",
-                   "SYK","BKNG","CB","PLD","CI","CME","SHW","FCX","COP","EOG","SLB","HAL",
-                   "LMT","GD","NOC","CRWD","PANW","PLTR","NET","DDOG","RKLB","HII"]
-    extras = ["SMCI","APP","CELH","DUOL","HUBS","WDAY","CYBR","IONQ","SOUN"]
-    tickers = list(set(tickers + extras))
-    end = datetime.now()
-    start = end - timedelta(days=years*365)
-    prices = yf.download(tickers, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"),
-                         group_by="ticker", auto_adjust=True, threads=True)
-    fundamentals = {}
-    n_t = len(tickers)
-    for i, t in enumerate(tickers):
-        try:
-            if callback and (i+1) % 50 == 0:
-                callback(f"Universe: info {i+1}/{n_t}...")
-            info = yf.Ticker(t).info
-            if not info or "marketCap" not in info: continue
-            fundamentals[t] = {
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                **{k: info.get(k) for k in [
-                    "marketCap","trailingPE","forwardPE","pegRatio","priceToSalesTrailing12Months",
-                    "priceToBook","enterpriseToEbitda","enterpriseToRevenue","profitMargins",
-                    "operatingMargins","grossMargins","returnOnEquity","returnOnAssets",
-                    "revenueGrowth","earningsGrowth","earningsQuarterlyGrowth","debtToEquity",
-                    "currentRatio","quickRatio","freeCashflow","operatingCashflow","totalRevenue",
-                    "totalDebt","totalCash","dividendYield","payoutRatio","beta","shortRatio",
-                    "sharesOutstanding","heldPercentInstitutions","sector","industry","shortName",
-                    "currentPrice","targetMeanPrice","recommendationKey","numberOfAnalystOpinions"
-                ]}
-            }
-        except: pass
-    try:
-        from .api_cache import set
-        prices_json = prices.to_json(orient="split") if hasattr(prices, "to_json") and not prices.empty else "{}"
-        set("yahoo_universe", str(years), {"tickers": tickers, "fundamentals": fundamentals, "prices_json": prices_json})
+        tickers.extend(tables[0]["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist())
     except Exception:
         pass
+    try:
+        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
+        for t in tables:
+            if "Ticker" in t.columns:
+                tickers.extend(t["Ticker"].astype(str).str.replace(".", "-", regex=False).tolist())
+                break
+            if "Symbol" in t.columns:
+                tickers.extend(t["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist())
+                break
+    except Exception:
+        pass
+    try:
+        tables = pd.read_html("https://en.wikipedia.org/wiki/Russell_1000_Index")
+        for t in tables:
+            if "Ticker" in t.columns:
+                tickers.extend(t["Ticker"].astype(str).str.replace(".", "-", regex=False).tolist())
+                break
+            if "Symbol" in t.columns:
+                tickers.extend(t["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist())
+                break
+    except Exception:
+        pass
+    tickers = list(dict.fromkeys(tickers))
+    if callback:
+        callback(f"Data: univers {len(tickers)} symboles (indices)")
+    if len(tickers) < 100:
+        tickers = ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","BRK-B","JPM","V","UNH","XOM","JNJ","WMT","PG","MA","HD","CVX","MRK","ABBV","LLY","PEP","KO","COST","AVGO","TMO","MCD","ACN","CSCO","ABT","NEE","TXN","RTX","LOW","HON","AMGN","IBM","CAT","BA","GS","BLK","SPGI","AXP","DE","ISRG","REGN","VRTX","GILD","SYK","BKNG","CB","PLD","CI","CME","SHW","FCX","COP","EOG","SLB","HAL","LMT","GD","NOC","CRWD","PANW","PLTR","NET","DDOG","RKLB","HII"]
+    return tickers
+
+
+def _dataframe_from_cache_dict(cached):
+    """Reconstruct DataFrame from cache dict (orient='split')."""
+    if not cached or "data" not in cached:
+        return None
+    try:
+        idx = pd.to_datetime(cached["index"]) if isinstance(cached["index"], list) else cached["index"]
+        return pd.DataFrame(cached["data"], index=idx, columns=cached.get("columns"))
+    except Exception:
+        return None
+
+
+def fetch_universe(years=5, callback=None):
+    """
+    Univers via get_universe_tickers (objectif 2500+). Prix année par année: 2011 → sauvegarde → 2012 → …
+    Premier fetch long, ensuite on ne requête que l'année courante. Reprise possible (checkpoint par année).
+    """
+    import yfinance as yf
+    from .api_cache import get as cache_get, set as cache_set
+
+    start_year, max_history_years, _ = _get_data_config()
+    end_year = datetime.now().year
+    start_year = max(start_year, end_year - max_history_years + 1)
+    year_list = list(range(start_year, end_year + 1))
+    if not year_list:
+        year_list = [end_year]
+
+    tickers = get_universe_tickers(callback=callback)
+    fundamentals = {}
+    for i, t in enumerate(tickers):
+        cached_info = cache_get("yahoo_info", t, max_age_hours=24)
+        if cached_info and isinstance(cached_info, dict):
+            fundamentals[t] = cached_info
+        else:
+            try:
+                info = yf.Ticker(t).info
+                if info and info.get("marketCap"):
+                    fundamentals[t] = {
+                        "date": datetime.now().strftime("%Y-%m-%d"),
+                        **{k: info.get(k) for k in [
+                            "marketCap","trailingPE","forwardPE","pegRatio","priceToSalesTrailing12Months",
+                            "priceToBook","enterpriseToEbitda","enterpriseToRevenue","profitMargins",
+                            "operatingMargins","grossMargins","returnOnEquity","returnOnAssets",
+                            "revenueGrowth","earningsGrowth","earningsQuarterlyGrowth","debtToEquity",
+                            "currentRatio","quickRatio","freeCashflow","operatingCashflow","totalRevenue",
+                            "totalDebt","totalCash","dividendYield","payoutRatio","beta","shortRatio",
+                            "sharesOutstanding","heldPercentInstitutions","sector","industry","shortName",
+                            "currentPrice","targetMeanPrice","recommendationKey","numberOfAnalystOpinions"
+                        ]}
+                    }
+                    cache_set("yahoo_info", t, fundamentals[t])
+            except Exception:
+                pass
+        if callback and (i + 1) % 50 == 0:
+            callback(f"Data: {len(fundamentals)}/{len(tickers)} sauvegardés (reprise si arrêt)")
+    if callback:
+        callback(f"Data: {len(fundamentals)}/{len(tickers)} tickers sauvegardés")
+
+    # Prix année par année: cache par an, pas tout recommencer
+    HOURS_20Y = 24 * 365 * 20
+    parts = []
+    for idx, y in enumerate(year_list):
+        is_current = y == end_year
+        max_age_h = 24 if is_current else HOURS_20Y
+        cached = cache_get("prices_yearly", str(y), max_age_hours=max_age_h)
+        if cached is not None:
+            df = _dataframe_from_cache_dict(cached)
+            if df is not None and not df.empty:
+                if callback:
+                    callback(f"Data: année {y} ({idx+1}/{len(year_list)}) cache")
+                parts.append(df)
+                continue
+        if callback:
+            callback(f"Data: téléchargement année {y} ({idx+1}/{len(year_list)})…")
+        end_date = datetime.now().strftime("%Y-%m-%d") if is_current else f"{y}-12-31"
+        try:
+            year_prices = yf.download(
+                tickers, start=f"{y}-01-01", end=end_date,
+                group_by="ticker", auto_adjust=True, threads=True, progress=False
+            )
+        except Exception:
+            year_prices = pd.DataFrame()
+        if year_prices.empty or (hasattr(year_prices, "columns") and len(year_prices.columns) == 0):
+            continue
+        try:
+            cache_set("prices_yearly", str(y), year_prices.to_dict(orient="split"))
+        except Exception:
+            pass
+        if callback:
+            callback(f"Data: année {y} sauvegardée ({idx+1}/{len(year_list)})")
+        parts.append(year_prices)
+
+    if not parts:
+        end = datetime.now()
+        start = datetime(start_year, 1, 1)
+        prices = yf.download(tickers, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"),
+                            group_by="ticker", auto_adjust=True, threads=True)
+    else:
+        prices = pd.concat(parts, axis=0)
+        if hasattr(prices.index, "duplicated"):
+            prices = prices[~prices.index.duplicated(keep="first")]
+        prices = prices.sort_index()
+    if callback:
+        callback(f"Data: universe prêt ({len(tickers)} tickers, {len(fundamentals)} infos)")
     return tickers, prices, fundamentals
 
 # ── SINGLE PRICE ──────────────────────────────────────────────

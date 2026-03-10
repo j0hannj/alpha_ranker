@@ -72,12 +72,18 @@ def set(source: str, cache_key: str, data, fetched_at=None):
         pass
 
 
-def clear_older_than_days(days: int = 30):
-    """Remove cache entries older than `days` to limit DB size."""
+def clear_older_than_days(days: int = 30, exclude_sources=None):
+    """Remove cache entries older than `days`. Never touch exclude_sources (e.g. prices_yearly)."""
+    if exclude_sources is None:
+        exclude_sources = ("prices_yearly", "yahoo_info", "fmp_fund")
     try:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         c = _conn()
-        c.execute("DELETE FROM api_cache WHERE fetched_at < ?", (cutoff,))
+        placeholders = ",".join("?" * len(exclude_sources))
+        c.execute(
+            f"DELETE FROM api_cache WHERE fetched_at < ? AND source NOT IN ({placeholders})",
+            [cutoff] + list(exclude_sources),
+        )
         c.commit()
         c.close()
     except Exception:

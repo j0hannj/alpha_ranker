@@ -18,10 +18,19 @@ except Exception:
 
 # Domains stored in system_config
 DOMAIN_MODEL = "model_settings"
+DOMAIN_DATA = "data_settings"
 DOMAIN_PORTFOLIO = "portfolio_settings"
 DOMAIN_TRANSACTION_COST = "transaction_cost_settings"
 DOMAIN_FEATURE = "feature_settings"
 DOMAIN_RISK = "risk_settings"
+
+# Data fetch: historique année par année, reprise possible
+DEFAULT_DATA_SETTINGS = {
+    "data_start_year": 2011,
+    "data_max_history_years": 15,
+    "data_min_tickers": 2500,
+    "data_universe_source": "fmp_then_indices",
+}
 
 # Available models (TCN/LSTM optional; enabled only if deps present)
 MODEL_IDS = ["LightGBM", "XGBoost", "RandomForest", "Ridge", "ElasticNet", "TCN", "LSTM"]
@@ -186,6 +195,12 @@ def get_risk_settings() -> dict:
     return _deep_merge(DEFAULT_RISK_SETTINGS, raw)
 
 
+def get_data_settings() -> dict:
+    """Data fetch config: start year, max history, min tickers. No hardcoding."""
+    raw = get_system_config(DOMAIN_DATA)
+    return _deep_merge(DEFAULT_DATA_SETTINGS, raw)
+
+
 def get_enabled_feature_columns() -> list:
     """List of feature column names that are enabled by current feature_settings."""
     feat = get_feature_settings()
@@ -223,6 +238,7 @@ def init_default_config():
     """Write default config into DB if not present (so UI has something to edit)."""
     for domain, default in [
         (DOMAIN_MODEL, DEFAULT_MODEL_SETTINGS),
+        (DOMAIN_DATA, DEFAULT_DATA_SETTINGS),
         (DOMAIN_FEATURE, DEFAULT_FEATURE_SETTINGS),
         (DOMAIN_PORTFOLIO, DEFAULT_PORTFOLIO_SETTINGS),
         (DOMAIN_TRANSACTION_COST, DEFAULT_TRANSACTION_COST_SETTINGS),
