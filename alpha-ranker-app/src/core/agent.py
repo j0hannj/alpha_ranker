@@ -463,5 +463,17 @@ def get_engine_status(api_key=None):
     if m: return "ollama",f"Ollama ({m})"
     return "none","No AI engine"
 
+
+def completion(system: str, user_msg: str, api_key: str | None) -> str:
+    """Single-turn LLM completion (same backends as chat). Returns raw response text."""
+    history = []
+    if api_key:
+        return _chat_claude(user_msg, system, history, api_key)
+    m = _check_ollama()
+    if m:
+        return _chat_ollama(user_msg, system, history, m)
+    return ""
+
+
 def get_history(): return _load_history()
 def clear_history(): _save_history([])

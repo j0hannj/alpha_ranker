@@ -12,7 +12,7 @@ Sources:
 """
 import calendar
 import logging
-import os, json, urllib.request
+import os, re, json, urllib.request
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -47,6 +47,62 @@ def _get_data_config():
 UNIVERSE_CACHE = CACHE_DIR / "universe_cache.json"
 # Cache léger des prix (pickle pandas, pas besoin de pyarrow/fastparquet)
 PRICES_CACHE = CACHE_DIR / "prices.pkl"
+
+# Regex: un ticker Yahoo valide = lettres, chiffres, tirets, points, 1-15 chars
+_VALID_TICKER_RE = re.compile(r"^[A-Z0-9][\w\-.]{0,14}$", re.ASCII)
+
+# Noms de catégories/régions/secteurs qui fuient depuis les tableaux Wikipedia
+_GARBAGE_NAMES = {
+    "CANADA", "FRANCE", "AUSTRALIA", "ASIA", "AFRICA", "EUROPE", "OCEANIA",
+    "JAPAN", "CHINA", "INDIA", "UK", "US", "BRAZIL", "CHILE", "COLOMBIA",
+    "MEXICO", "PERU", "ARGENTINA", "REGIONAL", "GLOBAL", "AMERICAS",
+    "LATIN", "SOUTH", "NEW",
+    "OTHER", "COMMODITIES", "METALS", "CONSUMER", "ENERGY", "FINANCIALS",
+    "HEALTHCARE", "INDUSTRIALS", "MATERIALS", "TECHNOLOGY", "UTILITIES",
+    "TELECOM", "SERVICES", "TRANSPORT", "TOTAL", "INDEX", "VARIOUS",
+    "SECTOR", "BASIC", "CAPITAL", "GOODS", "FOOD", "ELECTRONICS",
+    "EQUITIES", "WATER", "MAJOR", "REAL",
+}
+
+
+def _sanitize_ticker(raw: str):
+    """
+    Clean and validate a raw ticker string. Returns None if invalid.
+    Applied both during discovery AND when loading from DB cache.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    t = raw.strip()
+    t = t.replace("\xa0", " ").replace("\u200b", "").strip()
+    if ":" in t:
+        t = t.split(":", 1)[1].strip()
+    if " " in t:
+        return None
+    base = t.split(".")[0].upper()
+    if base in _GARBAGE_NAMES:
+        return None
+    if not t or len(t) > 15:
+        return None
+    if not _VALID_TICKER_RE.match(t.upper()):
+        return None
+    if t.lower() in ("ticker", "symbol", "code", "epic", "stock", "company", "name"):
+        return None
+    return t
+
+
+def _load_clean_universe():
+    """Load universe from DB and sanitize all ticker keys."""
+    try:
+        from . import portfolio
+        raw = portfolio.get_universe() or {}
+    except Exception:
+        return {}
+    clean = {}
+    for t, info in raw.items():
+        ct = _sanitize_ticker(t)
+        if ct is not None:
+            clean[ct] = info
+    return clean
 
 
 def _read_html_with_headers(url: str):
@@ -174,20 +230,8 @@ def _discover_from_wikipedia(callback=None):
                 continue
             count = 0
             for raw in target_table[ticker_col].dropna().astype(str):
-                tck = raw.strip()
-                # Nettoyage agressif pour éviter les pseudo-tickers non Yahoo:
-                # - enlever les préfixes type "OSE: YAR.OL"
-                # - ignorer les entrées génériques comme "EUROPE", "OTHER", etc.
-                if ":" in tck:
-                    tck = tck.split(":", 1)[1].strip()
-                if " " in tck:
-                    # Souvent des libellés ou des préfixes style "OTHER EQUITIES"
-                    continue
-                if tck.upper() in banned_tokens:
-                    continue
-                if not tck or len(tck) > 15:
-                    continue
-                if tck.lower() in ("ticker", "symbol", "code", "epic", "stock"):
+                tck = _sanitize_ticker(raw)
+                if tck is None:
                     continue
                 if idx.get("fix_dots"):
                     tck = tck.replace(".", "-")
@@ -492,6 +536,17 @@ def scan_and_expand_universe(callback=None):
     uv = get_universe_settings()
     logger.info("scan_and_expand_universe: universe_settings=%s", uv)
 
+    # One-shot DB cleanup: remove historically polluted tickers
+    try:
+        raw_universe = portfolio.get_universe() or {}
+        dirty = [t for t in raw_universe if _sanitize_ticker(t) is None]
+        if dirty:
+            logger.info("Purging %d invalid tickers from DB: %s...", len(dirty), dirty[:10])
+            clean_universe = {t: v for t, v in raw_universe.items() if _sanitize_ticker(t) is not None}
+            portfolio.save_universe(clean_universe)
+    except Exception as e:
+        logger.warning("DB ticker cleanup failed: %s", e)
+
     min_cap_cfg = uv.get("fmp_min_market_cap")
     min_cap = int(min_cap_cfg) if isinstance(min_cap_cfg, (int, float)) else 0
 
@@ -513,7 +568,7 @@ def scan_and_expand_universe(callback=None):
                     )
                     if callback:
                         callback("Universe: using cached scan (recent).")
-                    known = portfolio.get_universe() or {}
+                    known = _load_clean_universe()
                     today = datetime.now().strftime("%Y-%m-%d")
                     active = {
                         t: {
@@ -587,42 +642,20 @@ def scan_and_expand_universe(callback=None):
 
     # 3) Nettoyage global des tickers (headers / préfixes d'indices, etc.)
     GARBAGE_TICKERS = {
-        "EUROPE",
-        "OTHER",
-        "COMMODITIES",
-        "METALS",
-        "CONSUMER",
-        "ENERGY",
-        "FINANCIALS",
-        "HEALTHCARE",
-        "INDUSTRIALS",
-        "MATERIALS",
-        "TECHNOLOGY",
-        "UTILITIES",
-        "TELECOM",
-        "SERVICES",
-        "TRANSPORT",
-        "TOTAL",
-        "INDEX",
-        "VARIOUS",
-        "SECTOR",
-        "BASIC",
-        "CAPITAL",
-        "GOODS",
-        "FOOD",
+        "EUROPE", "OTHER", "COMMODITIES", "METALS", "CONSUMER", "ENERGY",
+        "FINANCIALS", "HEALTHCARE", "INDUSTRIALS", "MATERIALS", "TECHNOLOGY",
+        "UTILITIES", "TELECOM", "SERVICES", "TRANSPORT", "TOTAL", "INDEX",
+        "VARIOUS", "SECTOR", "BASIC", "CAPITAL", "GOODS", "FOOD",
     }
-    cleaned: dict[str, dict] = {}
+    cleaned = {}
     for sym, info in discovered.items():
-        # Strip éventuels préfixes de type "OSE: YAR.OL"
-        if ": " in sym:
-            sym = sym.split(": ", 1)[-1].strip()
-        # Enlever les tickers manifestement invalides ou trop longs
-        base = sym.split(".")[0].upper()
-        if base in GARBAGE_TICKERS:
+        clean = _sanitize_ticker(sym)
+        if clean is None:
             continue
-        if len(sym) > 12 or not sym:
+        base = clean.split(".")[0].upper()
+        if base in GARBAGE_TICKERS or base in _GARBAGE_NAMES:
             continue
-        cleaned[sym] = info
+        cleaned[clean] = info
     discovered = cleaned
 
     # 4) Agent web (facultatif, paramétré dans universe_settings.ai_web_queries)
@@ -640,7 +673,7 @@ def scan_and_expand_universe(callback=None):
     logger.info("scan_and_expand_universe: total discovered (raw)=%d", len(discovered))
 
     # 6) Merge avec univers connu, enrichir ensuite via yfinance (FMP profile → 403)
-    known = portfolio.get_universe() or {}
+    known = _load_clean_universe()
     known_set = set(known.keys())
     new_tickers = set(discovered.keys()) - known_set
     if callback:
@@ -819,7 +852,7 @@ def _load_known_universe_as_fundamentals():
     """Load known universe from DB and return as fundamentals-style dict."""
     try:
         from . import portfolio
-        known = portfolio.get_universe()
+        known = _load_clean_universe()
         today = datetime.now().strftime("%Y-%m-%d")
         return {
             t: {
@@ -836,6 +869,170 @@ def _load_known_universe_as_fundamentals():
     except Exception as e:
         logger.warning("_load_known_universe_as_fundamentals: %s", e)
         return {}
+
+
+# ── Repair Universe (AI-assisted ticker cleanup) ───────────────────────────
+
+def _find_suspect_tickers(universe: dict) -> list:
+    """Identify tickers that need AI or deterministic review."""
+    suspects = []
+    for t, info in universe.items():
+        suspicious = False
+        if "$" in t:
+            suspicious = True
+        if "\xa0" in t or "\u200b" in t:
+            suspicious = True
+        if " " in t:
+            suspicious = True
+        if ":" in t:
+            suspicious = True
+        if re.match(r"^[A-Z]+\.[A-Z]$", t):
+            suspicious = True
+        if re.match(r"^\d{1,4}\.HK$", t):
+            suspicious = True
+        if info.get("last_download_failed"):
+            suspicious = True
+        if suspicious:
+            suspects.append((t, info))
+    return suspects
+
+
+def _validate_ticker_yfinance(ticker: str, timeout_days: int = 5) -> bool:
+    """Quick validation: does yfinance return any data for this ticker?"""
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        hist = t.history(period=f"{timeout_days}d")
+        if hist is not None and not hist.empty and len(hist) > 0:
+            return True
+        info = t.info
+        if info and info.get("marketCap"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+_REPAIR_SYSTEM_PROMPT = """You are a financial ticker cleanup agent for Yahoo Finance.
+Given a raw ticker that failed or is suspect, propose 1 to 5 possible corrections as a JSON array of strings, ordered by likelihood.
+Patterns:
+- "$TICKER" → remove $ → "TICKER"
+- "EXCHANGE: TICKER" → keep only TICKER (e.g. "SEHK: 2015.HK" → "2015.HK")
+- "NAME X.SUFFIX" (space) → "NAME-X.SUFFIX" (e.g. "MAERSK B.CO" → "MAERSK-B.CO")
+- Canadian "TICKER.CLASS" (e.g. "GIB.A", "BBD.B", "RCI.B") → "TICKER-CLASS.TO"
+- HK numeric prefix: "0700.HK" is valid; "700.HK" also
+- Missing suffix → add logical suffix by exchange (e.g. ".TO" for Canada)
+- Invisible unicode (\\xa0, \\u200b) → remove
+Reply ONLY with a JSON array of strings, no explanation. Example: ["MAERSK-B.CO", "MAERSKB.CO"]
+If the ticker is clearly a category/country/sector name (e.g. CANADA, METALS), reply: []"""
+
+
+def _ai_suggest_corrections(ticker: str, info: dict, api_key: str | None) -> list:
+    """Ask LLM for correction suggestions. Returns list of ticker strings or []."""
+    try:
+        from . import agent
+        source = info.get("source", "")
+        err = info.get("last_error", "")
+        name = info.get("shortName", "")
+        user_msg = f"Ticker: {repr(ticker)}\nSource: {source}\nError: {err}\nName: {name}"
+        raw = agent.completion(_REPAIR_SYSTEM_PROMPT, user_msg, api_key)
+        if not raw:
+            return []
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:].strip()
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(x).strip() for x in parsed if x]
+        return []
+    except Exception as e:
+        logger.debug("_ai_suggest_corrections %s: %s", ticker, e)
+        return []
+
+
+def _deterministic_suggestions(ticker: str) -> list:
+    """Fallback when no LLM: apply known patterns only."""
+    out = []
+    t = ticker.strip().replace("$", "").replace("\xa0", " ").replace("\u200b", "").strip()
+    if ":" in t:
+        t = t.split(":", 1)[1].strip()
+    if " " in t:
+        out.append(t.replace(" ", "-"))
+        out.append(t.replace(" ", ""))
+    if t and t not in out:
+        out.insert(0, t)
+    return [x for x in out if x and _sanitize_ticker(x) is not None][:5]
+
+
+def repair_universe(callback=None, cancel_event=None, dry_run=False, api_key=None):
+    """
+    AI-assisted universe repair. Iterates over suspect tickers, uses LLM or deterministic
+    rules to suggest corrections, validates via yfinance, then applies or removes.
+    """
+    import time
+    try:
+        from . import portfolio
+    except Exception:
+        if callback:
+            callback("Repair: could not load portfolio module.")
+        return {"fixed": [], "removed": [], "skipped": []}
+
+    raw = portfolio.get_universe() or {}
+    universe = dict(raw)
+    suspects = _find_suspect_tickers(universe)
+
+    if callback:
+        callback(f"Repair: {len(suspects)} suspect tickers to process", progress=0)
+
+    fixed, removed, skipped = [], [], []
+    use_llm = bool(api_key or getattr(agent, "_check_ollama", lambda: None)())
+    try:
+        from . import agent
+        use_llm = bool(api_key or agent._check_ollama())
+    except Exception:
+        use_llm = False
+
+    for i, (ticker, info) in enumerate(suspects):
+        if cancel_event and cancel_event.is_set():
+            break
+        if callback:
+            callback(f"Repair {i+1}/{len(suspects)}: {ticker}...", progress=(i + 1) / max(len(suspects), 1))
+
+        suggestions = _ai_suggest_corrections(ticker, info, api_key) if use_llm else []
+        if not suggestions:
+            suggestions = _deterministic_suggestions(ticker)
+
+        resolved = False
+        for suggestion in suggestions:
+            time.sleep(0.3)
+            if _validate_ticker_yfinance(suggestion):
+                if not dry_run:
+                    universe.pop(ticker, None)
+                    universe[suggestion] = {**info, "repaired_from": ticker}
+                fixed.append((ticker, suggestion))
+                resolved = True
+                if callback:
+                    callback(f"  FIXED: {ticker} → {suggestion}")
+                break
+
+        if not resolved:
+            if not dry_run:
+                universe.pop(ticker, None)
+            removed.append(ticker)
+            if callback:
+                callback(f"  REMOVED: {ticker}")
+
+    if not dry_run and (fixed or removed):
+        portfolio.save_universe(universe)
+
+    if callback:
+        callback(
+            f"Repair done: {len(fixed)} fixed, {len(removed)} removed.",
+            progress=1.0,
+        )
+    return {"fixed": fixed, "removed": removed, "skipped": skipped}
 
 
 def _fetch_universe_yfinance(callback=None):
