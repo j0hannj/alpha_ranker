@@ -341,6 +341,64 @@ def build_fundamentals_from_yfinance(prices, yf_fund, callback=None):
             time.sleep(0.5)
     if callback:
         callback(f"Yahoo fundamentals: {len(fund_db)} tickers loaded ({sum(len(v) for v in fund_db.values())} quarterly records)")
+    # Alimenter la table fundamentals (append-only) comme pour les prix
+    try:
+        from . import portfolio as _pf
+        rows = []
+        for ticker, records in fund_db.items():
+            yinfo = yf_fund.get(ticker, {})
+            sector = yinfo.get("sector")
+            industry = yinfo.get("industry")
+            country = yinfo.get("country")
+            exchange = yinfo.get("exchange")
+            for r in records:
+                as_of = r.get("period_date") or r.get("filing_date")
+                if not as_of:
+                    continue
+                mcap = r.get("market_cap")
+                fcf_ps = r.get("fcf_per_share")
+                fcf_yield = None
+                if fcf_ps is not None and mcap is not None and mcap > 0:
+                    try:
+                        fcf_yield = float(fcf_ps) * 1e6 / float(mcap)
+                    except (TypeError, ValueError):
+                        pass
+                rows.append({
+                    "ticker": ticker,
+                    "as_of_date": as_of,
+                    "currency": None,
+                    "revenue": r.get("revenue"),
+                    "net_income": r.get("net_income"),
+                    "eps": r.get("eps"),
+                    "ebitda": r.get("ebitda"),
+                    "free_cash_flow": None,
+                    "shares_outstanding": None,
+                    "market_cap": mcap,
+                    "pe_ratio": r.get("pe_ratio"),
+                    "pb_ratio": r.get("pb_ratio"),
+                    "ev_ebitda": r.get("ev_ebitda"),
+                    "fcf_yield": fcf_yield,
+                    "dividend_yield": r.get("dividend_yield"),
+                    "roe": r.get("roe"),
+                    "gross_margin": r.get("gross_margin"),
+                    "operating_margin": r.get("operating_margin"),
+                    "net_margin": r.get("net_margin"),
+                    "debt_to_equity": r.get("debt_to_equity"),
+                    "current_ratio": r.get("current_ratio"),
+                    "peg_ratio": r.get("peg_ratio"),
+                    "sector": sector,
+                    "industry": industry,
+                    "country": country,
+                    "exchange": exchange,
+                    "source": "yahoo",
+                    "quality_flag": None,
+                })
+        if rows:
+            _pf.upsert_fundamentals(rows)
+            if callback:
+                callback(f"  DB: {len(rows)} fundamental rows written")
+    except Exception as e:
+        logger.warning("build_fundamentals_from_yfinance: upsert_fundamentals failed: %s", e)
     return fund_db
 
 # ══════════════════════════════════════════════════════════════
