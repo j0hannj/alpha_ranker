@@ -6,6 +6,9 @@ This module centralizes:
 - Sector-neutralization of features
 - Factor-neutralization of alpha scores
 - Sector × macro interaction features
+
+Transformer objects (fit on training data, transform train and test) to prevent data leakage:
+- Winsorizer, RankTransformer, FeatureDecorrelator, SectorNeutralizer
 """
 
 from __future__ import annotations
@@ -14,6 +17,133 @@ from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
+
+
+# ══════════════════════════════════════════════════════════════
+# FIT/TRANSFORM TRANSFORMERS (no test-set refitting)
+# ══════════════════════════════════════════════════════════════
+
+
+class Winsorizer:
+    """Fit bounds on training data; transform clips to those bounds. Prevents leakage from test quantiles."""
+
+    def __init__(self, quantile: float = 0.02):
+        self.quantile = quantile
+        self.bounds_: Dict[str, tuple] = {}  # col -> (low, high)
+        self.feat_cols_: List[str] = []
+
+    def fit(self, X: pd.DataFrame, feat_cols: Iterable[str]) -> "Winsorizer":
+        self.feat_cols_ = [c for c in feat_cols if c in X.columns]
+        for c in self.feat_cols_:
+            s = X[c].replace([np.inf, -np.inf], np.nan).dropna()
+            if len(s) == 0:
+                self.bounds_[c] = (0.0, 1.0)
+            else:
+                low = float(s.quantile(self.quantile))
+                high = float(s.quantile(1.0 - self.quantile))
+                self.bounds_[c] = (low, high)
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        out = X.copy()
+        for c in self.feat_cols_:
+            if c not in out.columns:
+                continue
+            low, high = self.bounds_.get(c, (None, None))
+            if low is not None and high is not None:
+                out[c] = out[c].clip(lower=low, upper=high)
+        return out
+
+
+class RankTransformer:
+    """Fit percentile ranks on training data; transform maps new values to percentile in train distribution. Prevents leakage."""
+
+    def __init__(self):
+        self.ref_sorted_: Dict[str, np.ndarray] = {}  # col -> sorted training values
+        self.feat_cols_: List[str] = []
+
+    def fit(self, X: pd.DataFrame, feat_cols: Iterable[str]) -> "RankTransformer":
+        self.feat_cols_ = [c for c in feat_cols if c in X.columns]
+        for c in self.feat_cols_:
+            s = X[c].replace([np.inf, -np.inf], np.nan).dropna()
+            if len(s) == 0:
+                self.ref_sorted_[c] = np.array([0.0])
+            else:
+                self.ref_sorted_[c] = np.sort(s.values.astype(float))
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        out = X.copy()
+        for c in self.feat_cols_:
+            if c not in out.columns:
+                continue
+            ref = self.ref_sorted_.get(c)
+            if ref is None or len(ref) == 0:
+                continue
+            vals = np.asarray(out[c].values, dtype=float)
+            nan_mask = np.isnan(vals) | np.isinf(vals)
+            idx = np.searchsorted(ref, np.where(nan_mask, np.nanmedian(ref), vals), side="right")
+            pct = np.clip(idx / len(ref), 0.0, 1.0)
+            pct = np.where(nan_mask, 0.5, pct)
+            out[c] = pct
+        return out
+
+
+class SectorNeutralizer:
+    """Fit sector means on training data; transform subtracts those means. Prevents leakage from test sector means."""
+
+    def __init__(self):
+        self.sector_means_: Dict[str, Dict[str, float]] = {}  # col -> {sector: mean}
+        self.feat_cols_: List[str] = []
+
+    def fit(self, X: pd.DataFrame, feat_cols: Iterable[str], sector_col: str = "sector") -> "SectorNeutralizer":
+        self.feat_cols_ = [c for c in feat_cols if c in X.columns]
+        if sector_col not in X.columns:
+            return self
+        for c in self.feat_cols_:
+            means = X.groupby(sector_col)[c].mean().to_dict()
+            self.sector_means_[c] = {k: float(v) for k, v in means.items()}
+        return self
+
+    def transform(self, X: pd.DataFrame, sector_col: str = "sector") -> pd.DataFrame:
+        out = X.copy()
+        if sector_col not in out.columns:
+            return out
+        sectors = out[sector_col].astype(str)
+        for c in self.feat_cols_:
+            if c not in out.columns:
+                continue
+            means_map = self.sector_means_.get(c, {})
+            sub = sectors.map(lambda s: means_map.get(s, 0.0))
+            out[c] = out[c] - sub
+        return out
+
+
+class FeatureDecorrelator:
+    """Fit PCA (or similar) on training data; transform uses fitted projection. Prevents leakage."""
+
+    def __init__(self, method: str = "pca", variance_ratio: float = 0.95):
+        self.method = method
+        self.variance_ratio = variance_ratio
+        self.fitted_: Optional[object] = None
+        self.feat_cols_: List[str] = []
+
+    def fit(self, X: pd.DataFrame, feat_cols: List[str]) -> "FeatureDecorrelator":
+        self.feat_cols_ = [c for c in feat_cols if c in X.columns]
+        if len(self.feat_cols_) < 2:
+            return self
+        out, self.fitted_ = decorrelate_features(
+            X, self.feat_cols_, method=self.method, variance_ratio=self.variance_ratio
+        )
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        if self.fitted_ is None or len(self.feat_cols_) < 2:
+            return X.copy()
+        out, _ = decorrelate_features(
+            X, self.feat_cols_, fitted_transformer=self.fitted_
+        )
+        return out
 
 
 def rank_features(df: pd.DataFrame, feat_cols: Iterable[str]) -> pd.DataFrame:

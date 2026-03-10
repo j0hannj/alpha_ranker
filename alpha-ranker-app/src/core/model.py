@@ -46,6 +46,10 @@ try:
         factor_neutralize_scores,
         add_sector_interactions,
         decorrelate_features,
+        Winsorizer,
+        RankTransformer,
+        FeatureDecorrelator,
+        SectorNeutralizer,
     )
 except Exception:
     # Fallback when core is imported without package context
@@ -57,6 +61,10 @@ except Exception:
         factor_neutralize_scores,
         add_sector_interactions,
         decorrelate_features,
+        Winsorizer,
+        RankTransformer,
+        FeatureDecorrelator,
+        SectorNeutralizer,
     )
 
 logger = logging.getLogger(__name__)
@@ -733,7 +741,7 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         if len(df)<20: continue
         df["period_idx"]=i; all_periods.append(df)
     if not all_periods:
-        if callback: callback("Not enough data"); return None,None,None,None,None,None
+        if callback: callback("Not enough data"); return None,None,None,None,None,None,None,None,None
     full_df = pd.concat(all_periods,ignore_index=True)
     all_num_cols = [c for c in full_df.columns if c not in meta_cols+["period_idx"]
                     and full_df[c].dtype in [np.float64,np.int64,float,int]]
@@ -762,24 +770,31 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         med = Xtr.median()
         Xtr = Xtr.fillna(med).replace([np.inf,-np.inf],np.nan).fillna(med)
         Xte = Xte.fillna(med).replace([np.inf,-np.inf],np.nan).fillna(med)
+        # Fit all transformers on training data only; transform both train and test (no test refitting).
         if winsorize:
-            Xtr = _apply_winsorization(Xtr, feat_cols, winsorize_q)
-            Xte = _apply_winsorization(Xte, feat_cols, winsorize_q)
-        # Rank transform + sector neutralize for training
-        Xtr_r = rank_features(Xtr,feat_cols)
-        Xte_r = rank_features(Xte,feat_cols)
+            wiz = Winsorizer(quantile=winsorize_q)
+            wiz.fit(Xtr, feat_cols)
+            Xtr = wiz.transform(Xtr)
+            Xte = wiz.transform(Xte)
+        rank_t = RankTransformer()
+        rank_t.fit(Xtr, feat_cols)
+        Xtr_r = rank_t.transform(Xtr)
+        Xte_r = rank_t.transform(Xte)
         if config.get("sector_neutralization", True) and "sector" in full_df.columns:
             Xtr_r = Xtr_r.copy(); Xtr_r["sector"] = trn["sector"].values
-            Xtr_r = sector_neutralize(Xtr_r, feat_cols, "sector"); Xtr_r = Xtr_r.drop(columns=["sector"], errors="ignore")
             Xte_r = Xte_r.copy(); Xte_r["sector"] = tst["sector"].values
-            Xte_r = sector_neutralize(Xte_r, feat_cols, "sector"); Xte_r = Xte_r.drop(columns=["sector"], errors="ignore")
+            sn = SectorNeutralizer()
+            sn.fit(Xtr_r, feat_cols, "sector")
+            Xtr_r = sn.transform(Xtr_r, "sector").drop(columns=["sector"], errors="ignore")
+            Xte_r = sn.transform(Xte_r, "sector").drop(columns=["sector"], errors="ignore")
         if config.get("feature_decorrelation"):
             method = config.get("decorrelation_method", "pca")
             var_ratio = float(config.get("pca_variance_ratio", 0.95))
-            Xtr_r, _fitted = decorrelate_features(Xtr_r, feat_cols, method=method, variance_ratio=var_ratio)
-            if _fitted is not None:
-                Xte_r, _ = decorrelate_features(Xte_r, feat_cols, method=method, variance_ratio=var_ratio, fitted_transformer=_fitted)
-        # Forward returns are never clipped; use robust models and feature winsorization for stability.
+            dec = FeatureDecorrelator(method=method, variance_ratio=var_ratio)
+            dec.fit(Xtr_r, feat_cols)
+            Xtr_r = dec.transform(Xtr_r)
+            Xte_r = dec.transform(Xte_r)
+        # Forward returns are never clipped.
         models = _get_models(config)
         for name,m in models.items():
             try:
@@ -821,25 +836,34 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         callback(f"Ensemble OOS Rank IC: {oos_metrics.get('spearman_rank_corr','?')}")
         for n,ic in oos_metrics.get("per_model_ic",{}).items(): callback(f"  {n}: IC={ic:.4f}")
 
-    # Final ensemble on ALL data with rank + sector neutral
+    # Final ensemble on ALL data: fit pipeline on X_all once, reuse same transforms at inference.
     if callback: callback("Training final ensemble...")
     X_all = full_df[feat_cols].copy(); y_all = full_df["forward_return"].copy()
     med_final = X_all.median()
     X_all = X_all.fillna(med_final).replace([np.inf,-np.inf],np.nan).fillna(med_final)
+    fitted_winsorizer = None
     if winsorize:
-        X_all = _apply_winsorization(X_all, feat_cols, winsorize_q)
-    X_all = rank_features(X_all,feat_cols)
+        fitted_winsorizer = Winsorizer(quantile=winsorize_q)
+        fitted_winsorizer.fit(X_all, feat_cols)
+        X_all = fitted_winsorizer.transform(X_all)
+    fitted_rank = RankTransformer()
+    fitted_rank.fit(X_all, feat_cols)
+    X_all = fitted_rank.transform(X_all)
+    fitted_sector_neutralizer = None
     if config.get("sector_neutralization", True) and "sector" in full_df.columns:
+        X_all = X_all.copy()
         X_all["sector"] = full_df["sector"].values
-        X_all = sector_neutralize(X_all,feat_cols,"sector")
-        X_all = X_all.drop(columns=["sector"],errors="ignore")
-    # Feature decorrelation on final training data: fit once, reuse at inference.
+        fitted_sector_neutralizer = SectorNeutralizer()
+        fitted_sector_neutralizer.fit(X_all, feat_cols, "sector")
+        X_all = fitted_sector_neutralizer.transform(X_all, "sector").drop(columns=["sector"], errors="ignore")
     fitted_decorrelation = None
     if config.get("feature_decorrelation"):
         method = config.get("decorrelation_method", "pca")
         var_ratio = float(config.get("pca_variance_ratio", 0.95))
-        X_all, fitted_decorrelation = decorrelate_features(X_all, feat_cols, method=method, variance_ratio=var_ratio)
-    # Forward returns are never clipped.
+        dec = FeatureDecorrelator(method=method, variance_ratio=var_ratio)
+        dec.fit(X_all, feat_cols)
+        fitted_decorrelation = dec.fitted_
+        X_all = dec.transform(X_all)
     final_models = {}
     for name,m in _get_models(config).items():
         try:
@@ -851,17 +875,18 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         except Exception as e:
             logger.warning("walk_forward final fit: %s failed: %s", name, e)
     feat_imp = _get_feature_importance(final_models,feat_cols)
-    return final_models, med_final, feat_cols, feat_imp, oos_metrics, fitted_decorrelation
+    return (final_models, med_final, feat_cols, feat_imp, oos_metrics,
+            fitted_decorrelation, fitted_winsorizer, fitted_rank, fitted_sector_neutralizer)
 
 # ══════════════════════════════════════════════════════════════
 # CURRENT PREDICTIONS → ALPHA SCORE + RANK
 # ══════════════════════════════════════════════════════════════
 def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
                     macro, sector_map, tickers, yf_info=None, callback=None, config=None, as_of_date=None,
-                    macro_by_region=None, fitted_decorrelation=None, alpha_spread=None):
+                    macro_by_region=None, fitted_decorrelation=None, alpha_spread=None,
+                    fitted_winsorizer=None, fitted_rank_transformer=None, fitted_sector_neutralizer=None):
     """Generate current alpha scores and ranks using the trained ensemble. Model output is an alpha score (ranking signal), not a direct return.
-    alpha_spread: historical long-short return from training (mean_ls_return); used to scale alpha_score into expected_return_estimate.
-    fitted_decorrelation: when feature_decorrelation is enabled, the transformer fitted at training time (do not refit at inference)."""
+    Fitted transformers (winsorizer, rank, sector_neutralizer, decorrelation) must be applied in order; no refitting at inference."""
     if config is None:
         try:
             from core.engine_config import get_model_settings
@@ -902,16 +927,24 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
         df["num_analysts"] = df["ticker"].map(lambda t: yf_info.get(t,{}).get("numberOfAnalystOpinions"))
 
     X = df[feat_cols].fillna(medians).replace([np.inf,-np.inf],np.nan).fillna(medians)
-    if winsorize:
+    # Apply fitted transformers only (no refitting) in same order as training.
+    if fitted_winsorizer is not None:
+        X = fitted_winsorizer.transform(X)
+    elif winsorize:
         X = _apply_winsorization(X, feat_cols, winsorize_q)
-    X = rank_features(X, feat_cols)  # Same transform as training
-    # Sector neutralization (mirror training pipeline)
+    if fitted_rank_transformer is not None:
+        X = fitted_rank_transformer.transform(X)
+    else:
+        X = rank_features(X, feat_cols)
     if config.get("sector_neutralization", True) and "sector" in df.columns:
-        X_neut = X.copy()
-        X_neut["sector"] = df["sector"].values
-        X_neut = sector_neutralize(X_neut, feat_cols, "sector")
-        X = X_neut.drop(columns=["sector"], errors="ignore")
-    # Feature decorrelation: use transformer fitted at training; never refit at inference.
+        if fitted_sector_neutralizer is not None:
+            X = X.copy()
+            X["sector"] = df["sector"].values
+            X = fitted_sector_neutralizer.transform(X, "sector").drop(columns=["sector"], errors="ignore")
+        else:
+            X_neut = X.copy()
+            X_neut["sector"] = df["sector"].values
+            X = sector_neutralize(X_neut, feat_cols, "sector").drop(columns=["sector"], errors="ignore")
     if config.get("feature_decorrelation") and fitted_decorrelation is not None:
         X, _ = decorrelate_features(X, feat_cols, fitted_transformer=fitted_decorrelation)
     elif config.get("feature_decorrelation") and fitted_decorrelation is None:
@@ -1414,11 +1447,12 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         med = Xtr.median()
         Xtr = Xtr.fillna(med).replace([np.inf, -np.inf], np.nan).fillna(med)
         Xte = Xte.fillna(med).replace([np.inf, -np.inf], np.nan).fillna(med)
+        # Fit rank on train only; transform train and test (no test refitting).
+        rank_t = RankTransformer()
+        rank_t.fit(Xtr, fcols)
+        Xtr = rank_t.transform(Xtr)
+        Xte = rank_t.transform(Xte)
 
-        Xtr = rank_features(Xtr, fcols)
-        Xte = rank_features(Xte, fcols)
-
-        # Forward returns are never clipped.
         models = _get_models()
         for name, m in models.items():
             try:
@@ -1456,9 +1490,10 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
     y_all = df["forward_return"].copy()
     medians = X_all.median()
     X_all = X_all.fillna(medians).replace([np.inf, -np.inf], np.nan).fillna(medians)
-    X_all = rank_features(X_all, fcols)
+    fitted_rank_simple = RankTransformer()
+    fitted_rank_simple.fit(X_all, fcols)
+    X_all = fitted_rank_simple.transform(X_all)
     X_all = X_all.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    # Forward returns are never clipped.
 
     ensemble = {}
     for name, m in _get_models().items():
@@ -1519,7 +1554,7 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         return None, None, None, None, None, None
 
     Xc = results[fcols].fillna(medians).replace([np.inf, -np.inf], np.nan).fillna(medians)
-    Xc = rank_features(Xc, fcols)
+    Xc = fitted_rank_simple.transform(Xc)
     Xc = Xc.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     preds, blend = predict_ensemble(ensemble, Xc, return_per_model=True)
@@ -1765,16 +1800,20 @@ def run_full_pipeline(callback=None):
             if wf[0] is None:
                 if callback: callback(f"  {lbl}: insufficient data, skipping", (idx + 1) / total_h)
                 continue
-            final_models,medians,feat_cols,feat_imp,oos_metrics,fitted_decorrelation = wf
+            (final_models, medians, feat_cols, feat_imp, oos_metrics,
+             fitted_decorrelation, fitted_winsorizer, fitted_rank, fitted_sector_neutralizer) = wf
             if config_h.get("execution_mode") == "single":
                 single_id = config_h.get("single_model_id")
                 if single_id and single_id in final_models:
                     final_models = {single_id: final_models[single_id]}
             alpha_spread = oos_metrics.get("mean_ls_return")
-            results_h,blend = predict_current(final_models,medians,feat_cols,prices,fund_db,
-                                            macro,sector_map,list(yf_fund.keys()),
-                                            yf_info=yf_fund,callback=callback,config=config_h,as_of_date=as_of_date,
-                                            macro_by_region=macro_by_region,fitted_decorrelation=fitted_decorrelation,alpha_spread=alpha_spread)
+            results_h, blend = predict_current(
+                final_models, medians, feat_cols, prices, fund_db, macro, sector_map, list(yf_fund.keys()),
+                yf_info=yf_fund, callback=callback, config=config_h, as_of_date=as_of_date,
+                macro_by_region=macro_by_region, fitted_decorrelation=fitted_decorrelation, alpha_spread=alpha_spread,
+                fitted_winsorizer=fitted_winsorizer, fitted_rank_transformer=fitted_rank,
+                fitted_sector_neutralizer=fitted_sector_neutralizer,
+            )
             if sentiment: results_h["news_sentiment"] = results_h["ticker"].map(sentiment).fillna(0)
             all_horizon_results[H] = {"results": results_h,"feat_imp": feat_imp,"oos_metrics": oos_metrics,"blend": blend}
             if callback: callback(f"  {lbl} done: IC={oos_metrics.get('spearman_rank_corr','?')} | {len(results_h)} stocks", (idx + 1) / total_h)
