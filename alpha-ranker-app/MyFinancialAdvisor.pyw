@@ -1,7 +1,9 @@
 """MyFinancialAdvisor — Professional Launcher with Splash Screen."""
+import logging
 import sys, os, subprocess, time
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 ROOT = Path(__file__).parent
 APP = ROOT / "src" / "app.py"
 VENV_PY = ROOT / "venv" / "Scripts" / "python.exe"
@@ -29,7 +31,8 @@ def show_splash():
     try:
         if ICON.exists():
             splash.iconbitmap(str(ICON))
-    except: pass
+    except Exception as e:
+        logger.debug("splash iconbitmap: %s", e)
 
     # Load splash image
     if SPLASH_IMG.exists():

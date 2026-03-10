@@ -2,8 +2,11 @@
 Shows splash screen, then launches the main app.
 Bundled by PyInstaller into a single .exe with custom icon.
 """
+import logging
 import sys, os, time, threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # PyInstaller sets _MEIPASS for bundled mode
 if getattr(sys, 'frozen', False):
@@ -47,7 +50,8 @@ def show_splash():
             tk.Label(splash, image=photo, bd=0).pack()
             splash._photo = photo  # prevent GC
             splash_loaded = True
-    except: pass
+    except Exception as e:
+        logger.debug("splash PIL image: %s", e)
     
     if not splash_loaded:
         splash.configure(bg="#0c0c19")
