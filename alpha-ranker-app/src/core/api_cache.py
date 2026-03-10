@@ -120,10 +120,31 @@ def set(source: str, cache_key: str, data, fetched_at=None):
         pass
 
 
+def get_stored_universe_list():
+    """
+    Liste d'univers stockée en DB. Reste disponible même si l'API ne renvoie plus un titre (délisté, etc.).
+    Retourne une liste de tickers (ou list de dict avec isin/ticker si on passe en ISIN plus tard).
+    """
+    try:
+        raw = get("universe_list", "securities", max_age_hours=24 * 365 * 50)
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict) and "tickers" in raw:
+            return raw["tickers"]
+        return []
+    except Exception:
+        return []
+
+
+def set_stored_universe_list(tickers):
+    """Enregistre la liste d'univers en DB (persistante, pas effacée par clear_older_than_days)."""
+    set("universe_list", "securities", {"tickers": list(tickers), "updated": datetime.now().isoformat()})
+
+
 def clear_older_than_days(days: int = 30, exclude_sources=None):
-    """Remove cache entries older than `days`. Never touch exclude_sources (e.g. prices_yearly)."""
+    """Remove cache entries older than `days`. Never touch exclude_sources (e.g. prices_yearly, universe_list)."""
     if exclude_sources is None:
-        exclude_sources = ("prices_yearly",)
+        exclude_sources = ("prices_yearly", "universe_list")
     try:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         c = _conn()

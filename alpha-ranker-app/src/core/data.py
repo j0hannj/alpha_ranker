@@ -152,7 +152,16 @@ def fetch_universe(years=5, callback=None):
         except Exception:
             pass
 
-    tickers = get_universe_tickers(callback=callback)
+    # Liste stockée en DB = priorité : ce qui est en base reste même si l'API ne le renvoie plus
+    from .api_cache import get_stored_universe_list, set_stored_universe_list
+    stored = get_stored_universe_list()
+    fresh = get_universe_tickers(callback=callback)
+    tickers = list(set(stored) | set(fresh))
+    if not tickers:
+        tickers = fresh
+    set_stored_universe_list(tickers)
+    if callback and stored:
+        callback(f"Data: univers {len(tickers)} (dont {len(stored)} déjà en base, conservés)")
     fundamentals = {}
     for i, t in enumerate(tickers):
         cached_info = cache_get("yahoo_info", t, max_age_hours=24)

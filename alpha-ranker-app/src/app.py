@@ -1435,11 +1435,13 @@ class AlphaRanker(ctk.CTk):
 
     def _universe_fill_tickers(self):
         try:
-            from core.api_cache import get_cached_ticker_list, get_cache_status
-            tickers=get_cached_ticker_list()
+            from core.api_cache import get_stored_universe_list, get_cached_ticker_list, get_cache_status
+            tickers=get_stored_universe_list()
+            if not tickers:
+                tickers=get_cached_ticker_list()
             st=get_cache_status()
             n=st.get("n_tickers") or len(tickers)
-            self._universe_count_lbl.configure(text=f"{len(tickers)} tickers" if tickers else "Aucun (lancer un fetch data)")
+            self._universe_count_lbl.configure(text=f"{len(tickers)} (stockés en base)" if tickers else "Aucun (lancer un fetch data)")
         except Exception:
             tickers=[]; self._universe_count_lbl.configure(text="")
         for c in self._universe_tree.get_children(""): self._universe_tree.delete(c)
