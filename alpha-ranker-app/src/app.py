@@ -56,10 +56,12 @@ class AlphaRanker(ctk.CTk):
         self._init_backtest()
         self._init_settings()
         # Load cache
+        self.all_horizon_results = {}
         c=model.load_cached()
         if c:
             self.model_results=c.get("results"); self.feat_imp=c.get("feat_imp")
             self.model_info=c.get("model_info"); self.macro=c.get("macro")
+            self.all_horizon_results=c.get("all_horizons") or {}
             self.after(100,self._refresh_data_updated_label)
             self.after(150,self._upd_rankings)
         self.after(1000,self._refresh_prices)
@@ -698,9 +700,10 @@ class AlphaRanker(ctk.CTk):
                 for k,s in [("fred_key","FRED_API_KEY"),("fmp_key","FMP_API_KEY"),("av_key","ALPHA_VANTAGE_KEY")]:
                     v=portfolio.get_setting(k)
                     if v: os.environ[s]=v
-                res,fi,info,mac=model.run_full_pipeline(callback=cb)
+                res,fi,info,mac,all_hr=model.run_full_pipeline(callback=cb)
                 if res is None: self.after(0,lambda:self.rk_status.configure(text="Failed",text_color="#f87171")); return
                 self.model_results=res; self.feat_imp=fi; self.model_info=info; self.macro=mac
+                self.all_horizon_results=all_hr if all_hr else {}
                 self.model_state=model.get_model_state()
                 self._refresh_data_updated_label()
                 pmic=info.get("per_model_ic",{})
