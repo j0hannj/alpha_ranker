@@ -44,15 +44,22 @@ def _get_data_config():
         return 2011, 15, 2500
 
 
-# ── UNIVERSE (FMP screener + DB persistence, découverte automatique) ────────
+# ── UNIVERSE (FMP free endpoints + DB persistence, découverte automatique) ────────
 UNIVERSE_CACHE = CACHE_DIR / "universe_cache.json"
 
 
 def scan_and_expand_universe(callback=None):
     """
-    Scan markets via FMP screener to discover new stocks.
-    Merge with known universe from DB and persist. Called at start of fetch_all_data.
-    Returns dict ticker -> {shortName, sector, marketCap, currentPrice, ...} (fundamentals format).
+    Découvrir de nouvelles actions en utilisant UNIQUEMENT les endpoints FMP gratuits.
+    Pipeline:
+      1) /api/v3/available-traded/list → tous les instruments
+      2) Filtre par exchange côté client
+      3) Compare avec l'univers connu en DB (portfolio.get_universe)
+      4) Enrichit les nouveaux (et ceux sans sector/marketCap) via /api/v3/profile/{SYM1,SYM2,...}
+      5) Filtre par market cap pour l'univers actif
+      6) Sauvegarde tout l'univers (enrichi ou non) dans la table universe
+
+    Retourne un dict ticker -> {shortName, sector, industry, marketCap, currentPrice, country, exchange, date}.
     """
     logger.info("scan_and_expand_universe: start")
     api_key = os.environ.get("FMP_API_KEY")
@@ -63,7 +70,7 @@ def scan_and_expand_universe(callback=None):
         logger.warning("scan_and_expand_universe imports: %s", e)
         return _load_known_universe_as_fundamentals()
 
-    # Optional: skip scan if last scan was recent
+    # Optional: skip scan if last scan was recent (scan_frequency_hours)
     uv = get_universe_settings()
     logger.info("scan_and_expand_universe: universe_settings=%s", uv)
     scan_freq_h = uv.get("scan_frequency_hours", 24)
@@ -77,7 +84,30 @@ def scan_and_expand_universe(callback=None):
                     logger.info("scan_and_expand_universe: using cached scan (last=%s, freq_h=%s)", last, scan_freq_h)
                     if callback:
                         callback("Universe: using cached scan (recent).")
-                    return _load_known_universe_as_fundamentals()
+                    # On utilise l'univers déjà en base, filtré par market cap
+                    known = portfolio.get_universe() or {}
+                    min_cap = uv.get("fmp_min_market_cap") or 500_000_000
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    active = {
+                        t: {
+                            "shortName": info.get("shortName") or t,
+                            "sector": info.get("sector"),
+                            "industry": info.get("industry"),
+                            "marketCap": info.get("marketCap"),
+                            "currentPrice": info.get("currentPrice"),
+                            "country": info.get("country"),
+                            "exchange": info.get("exchange"),
+                            "date": today,
+                            "discovered_at": info.get("discovered_at"),
+                        }
+                        for t, info in known.items()
+                        if (info.get("marketCap") or 0) >= min_cap
+                    }
+                    logger.info(
+                        "scan_and_expand_universe: returning cached DB universe of %d active stocks",
+                        len(active),
+                    )
+                    return active
         except Exception:
             pass
 
@@ -87,32 +117,195 @@ def scan_and_expand_universe(callback=None):
             callback("FMP key needed to discover new stocks. Set it in Settings.")
         return _load_known_universe_as_fundamentals()
 
-    exchange_list = uv.get("fmp_exchanges") or []
     min_cap = uv.get("fmp_min_market_cap") or 500_000_000
-    limit = uv.get("fmp_screener_limit") or 3000
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # 1) Liste brute via /available-traded/list (GRATUIT)
+    all_instruments = _fetch_all_traded(api_key, uv, callback)
+    if not all_instruments:
+        logger.warning("scan_and_expand_universe: available-traded/list returned empty; falling back to known universe")
+        return _load_known_universe_as_fundamentals()
+
+    all_tickers = {s["symbol"] for s in all_instruments if s.get("symbol")}
+    logger.info("scan_and_expand_universe: %d tickers after exchange/type filter", len(all_tickers))
+
+    # 2) Comparer avec l'univers connu en DB
+    known = portfolio.get_universe() or {}
+    known_set = set(known.keys())
+    new_tickers = all_tickers - known_set
+    if callback:
+        callback(f"Known: {len(known_set)} | Discovered: {len(new_tickers)} new")
     logger.info(
-        "scan_and_expand_universe: scanning %d exchanges (min_cap=%s, limit=%s)",
-        len(exchange_list),
-        min_cap,
-        limit,
+        "scan_and_expand_universe: known=%d, new=%d",
+        len(known_set),
+        len(new_tickers),
     )
-    discovered = {}
-    for exchange_str in exchange_list:
-        label = exchange_str.split(",")[0] if exchange_str else "?"
+
+    # 3) Enrichir les nouveaux + connus incomplets via /profile (GRATUIT)
+    need_enrichment = list(new_tickers)
+    need_enrichment += [
+        t
+        for t, info in known.items()
+        if not info.get("sector") or not info.get("marketCap")
+    ]
+    # Limiter pour respecter le rate limit free (250 req/jour, batch 50 → max ~2500 tickers)
+    max_enrich = int(uv.get("max_profile_enrichment", 2000))
+    need_enrichment = list(dict.fromkeys(need_enrichment))[:max_enrich]
+    logger.info("scan_and_expand_universe: need_enrichment=%d", len(need_enrichment))
+
+    profiles = {}
+    if need_enrichment:
+        if callback:
+            callback(f"Enriching {len(need_enrichment)} stocks (FMP profile)...")
+        profiles = _enrich_with_profiles(need_enrichment, api_key, callback)
+
+    # 4) Construire l'univers complet: connus + profils + bruts
+    now_iso = datetime.now().isoformat()
+    full_universe: dict[str, dict] = dict(known)
+
+    # a) Appliquer les profils détaillés
+    for sym, info in profiles.items():
+        base = full_universe.get(sym, {})
+        full_universe[sym] = {
+            "shortName": info.get("shortName") or base.get("shortName") or sym,
+            "sector": info.get("sector") or base.get("sector"),
+            "industry": info.get("industry") or base.get("industry"),
+            "marketCap": info.get("marketCap") or base.get("marketCap"),
+            "currentPrice": info.get("currentPrice") or base.get("currentPrice"),
+            "country": info.get("country") or base.get("country"),
+            "exchange": info.get("exchange") or base.get("exchange"),
+            "date": today,
+            "discovered_at": base.get("discovered_at") or (now_iso if sym in new_tickers else None),
+            "last_seen_at": now_iso,
+        }
+
+    # b) Ajouter les instruments bruts qui n'ont pas de profil
+    for s in all_instruments:
+        sym = s.get("symbol")
+        if not sym:
+            continue
+        if sym in full_universe:
+            continue
+        exch = s.get("exchangeShortName") or s.get("exchange")
+        full_universe[sym] = {
+            "shortName": s.get("name") or sym,
+            "sector": None,
+            "industry": None,
+            "marketCap": None,
+            "currentPrice": s.get("price"),
+            "country": s.get("country"),
+            "exchange": exch,
+            "date": today,
+            "discovered_at": now_iso if sym in new_tickers else None,
+            "last_seen_at": now_iso,
+        }
+
+    logger.info("scan_and_expand_universe: saving universe of %d tickers to DB", len(full_universe))
+    portfolio.save_universe(full_universe)
+    try:
+        portfolio.set_setting("universe_last_scan", datetime.now().isoformat())
+    except Exception as e:
+        logger.warning("scan_and_expand_universe: failed to persist universe_last_scan: %s", e)
+    logger.info("scan_and_expand_universe: end")
+    # 5) Retourner l'univers ACTIF filtré par market cap
+    active = {
+        t: {
+            "shortName": info.get("shortName") or t,
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "marketCap": info.get("marketCap"),
+            "currentPrice": info.get("currentPrice"),
+            "country": info.get("country"),
+            "exchange": info.get("exchange"),
+            "date": today,
+            "discovered_at": info.get("discovered_at"),
+        }
+        for t, info in full_universe.items()
+        if (info.get("marketCap") or 0) >= min_cap
+    }
+    logger.info("scan_and_expand_universe: active universe size=%d (min_mcap=%s)", len(active), min_cap)
+    if callback:
+        callback(f"Active universe: {len(active)} stocks (mcap > {min_cap/1e9:.1f}B)")
+    return active
+
+
+def _fetch_all_traded(api_key: str, uv: dict, callback=None):
+    """
+    /api/v3/available-traded/list — GRATUIT.
+    Retourne tous les instruments tradés; on filtre ensuite par exchange + type.
+    """
+    url = f"https://financialmodelingprep.com/api/v3/available-traded/list?apikey={api_key}"
+    logger.info("scan_and_expand_universe: calling available-traded/list")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            all_instruments = json.loads(r.read().decode())
+    except Exception as e:
+        logger.warning("scan_and_expand_universe: available-traded/list failed: %s", e)
+        if callback:
+            callback(f"FMP available-traded/list error: {e}")
+        return []
+
+    if callback:
+        callback(f"FMP returned {len(all_instruments)} instruments")
+
+    # Exchanges wanted: from config, sinon set par défaut raisonnable
+    cfg_exchanges = uv.get("fmp_exchanges") or []
+    if cfg_exchanges:
+        wanted = [e.lower() for e in cfg_exchanges]
+    else:
+        wanted = [
+            "nyse",
+            "nasdaq",
+            "amex",
+            "euronext",
+            "xetra",
+            "lse",
+            "paris",
+            "amsterdam",
+            "brussels",
+            "milan",
+            "frankfurt",
+        ]
+
+    stocks = []
+    for s in all_instruments or []:
+        sym = (s.get("symbol") or "").strip()
+        if not sym:
+            continue
+        exch = (s.get("exchangeShortName") or s.get("exchange") or "").strip()
+        typ = (s.get("type") or "").lower()
+
+        # Virer warrants, units, preferred, crypto, forex, fonds
+        if any(x in sym for x in ["-W", "-U", ".WS", "-WT", "-R"]):
+            continue
+        if typ in ("crypto", "forex", "fund", "trust", "etf"):
+            continue
+
+        if wanted and not any(w in exch.lower() for w in wanted):
+            continue
+
+        stocks.append(s)
+
+    if callback:
+        callback(f"After exchange filter: {len(stocks)} stocks")
+    logger.info("scan_and_expand_universe: after exchange/type filter -> %d instruments", len(stocks))
+    return stocks
+
+
+def _enrich_with_profiles(tickers, api_key: str, callback=None):
+    """
+    /api/v3/profile/{sym1,sym2,...} — GRATUIT.
+    Retourne sector, marketCap, PE, country... par batch (50).
+    """
+    fundamentals: dict[str, dict] = {}
+    batch_size = 50
+
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i : i + batch_size]
         try:
-            logger.info("scan_and_expand_universe: scanning exchange=%s", exchange_str)
-            if callback:
-                callback(f"Scanning {label}...")
-            url = (
-                "https://financialmodelingprep.com/api/v3/stock-screener"
-                f"?marketCapMoreThan={int(min_cap)}"
-                f"&isActivelyTrading=true"
-                f"&exchange={exchange_str}"
-                f"&limit={int(limit)}"
-                f"&apikey={api_key}"
-            )
+            symbols = ",".join(batch)
+            url = f"https://financialmodelingprep.com/api/v3/profile/{symbols}?apikey={api_key}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=30) as r:
                 data = json.loads(r.read().decode())
@@ -120,60 +313,25 @@ def scan_and_expand_universe(callback=None):
                 sym = item.get("symbol")
                 if not sym:
                     continue
-                discovered[sym] = {
-                    "name": item.get("companyName"),
+                fundamentals[sym] = {
+                    "shortName": item.get("companyName"),
                     "sector": item.get("sector"),
                     "industry": item.get("industry"),
                     "marketCap": item.get("marketCap") or item.get("mktCap"),
-                    "price": item.get("price"),
+                    "currentPrice": item.get("price"),
+                    "beta": item.get("beta"),
+                    "trailingPE": item.get("peRatio"),
                     "country": item.get("country"),
-                    "exchange": item.get("exchangeShortName") or label,
+                    "exchange": item.get("exchangeShortName"),
                 }
-            n_items = len(data) if isinstance(data, list) else 0
-            logger.info("scan_and_expand_universe: %s -> %d stocks", label, n_items)
-            if callback:
-                callback(f"  {label}: {n_items} stocks found")
+            if callback and (i // batch_size) % 4 == 0:
+                callback(f"  Profiles: {min(i+batch_size, len(tickers))}/{len(tickers)}")
         except Exception as e:
-            logger.warning("scan_and_expand_universe: FMP screener %s failed: %s", exchange_str, e)
+            logger.warning("scan_and_expand_universe: profile batch starting at %d failed: %s", i, e)
             if callback:
-                callback(f"  {label} scan error: {e}")
-
-    known = portfolio.get_universe()
-    known_set = set(known.keys())
-    new_tickers = set(discovered.keys()) - known_set
-    logger.info(
-        "scan_and_expand_universe: complete. total_discovered=%d, new=%d, known_before=%d",
-        len(discovered),
-        len(new_tickers),
-        len(known_set),
-    )
-    if callback:
-        callback(f"Scan complete: {len(discovered)} total, {len(new_tickers)} NEW discoveries")
-
-    # Merge: known + discovered (discovered overwrites for fresh data)
-    now_iso = datetime.now().isoformat()
-    full = dict(known)
-    for t, info in discovered.items():
-        full[t] = {
-            "shortName": info.get("name") or t,
-            "sector": info.get("sector"),
-            "industry": info.get("industry"),
-            "marketCap": info.get("marketCap"),
-            "currentPrice": info.get("price"),
-            "country": info.get("country"),
-            "exchange": info.get("exchange"),
-            "date": today,
-            "discovered_at": now_iso if t in new_tickers else known.get(t, {}).get("discovered_at"),
-        }
-
-    logger.info("scan_and_expand_universe: saving universe of %d tickers to DB", len(full))
-    portfolio.save_universe(full)
-    try:
-        portfolio.set_setting("universe_last_scan", datetime.now().isoformat())
-    except Exception as e:
-        logger.warning("scan_and_expand_universe: failed to persist universe_last_scan: %s", e)
-    logger.info("scan_and_expand_universe: end")
-    return full
+                callback(f"  Profile error at {i}: {e}")
+    logger.info("scan_and_expand_universe: enriched profiles for %d tickers", len(fundamentals))
+    return fundamentals
 
 
 def _load_known_universe_as_fundamentals():
@@ -188,8 +346,9 @@ def _load_known_universe_as_fundamentals():
                 "sector": info.get("sector"),
                 "industry": info.get("industry"),
                 "marketCap": info.get("marketCap"),
-                "currentPrice": None,
+                "currentPrice": info.get("currentPrice"),
                 "date": today,
+                "discovered_at": info.get("discovered_at"),
             }
             for t, info in known.items()
         }
