@@ -148,10 +148,10 @@ def fetch_universe(years=5, callback=None):
             from .api_cache import get_cache_status
             st = get_cache_status()
             path_short = str(Path(st["path"]).parent.name) + "/" + Path(st["path"]).name
-            periods = getattr(st, "prices_monthly_periods", None) or st.get("prices_monthly_periods", [])
+            periods = st.get("prices_monthly_periods", [])
             if isinstance(periods, list) and periods:
-                p_min = min(x.get("period", x) for x in periods) if periods else ""
-                p_max = max(x.get("period", x) for x in periods) if periods else ""
+                p_min = min(x.get("period", x) for x in periods)
+                p_max = max(x.get("period", x) for x in periods)
                 callback(f"Cache: {path_short} | {len(periods)} mois ({p_min}..{p_max})")
             else:
                 n_tk = st.get("n_tickers")
