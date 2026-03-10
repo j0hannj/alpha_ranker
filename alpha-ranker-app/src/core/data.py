@@ -537,6 +537,28 @@ def scan_and_expand_universe(callback=None):
                             len(active),
                         )
                         return active
+                    if len(known) >= min_cached:
+                        logger.info(
+                            "scan_and_expand_universe: active=%d < min_cached, but known=%d >= min_cached — using full known universe",
+                            len(active),
+                            len(known),
+                        )
+                        if callback:
+                            callback("Universe: using %d known tickers (cached)." % len(known))
+                        return {
+                            t: {
+                                "shortName": info.get("shortName") or t,
+                                "sector": info.get("sector"),
+                                "industry": info.get("industry"),
+                                "marketCap": info.get("marketCap"),
+                                "currentPrice": info.get("currentPrice"),
+                                "country": info.get("country"),
+                                "exchange": info.get("exchange"),
+                                "date": today,
+                                "discovered_at": info.get("discovered_at"),
+                            }
+                            for t, info in known.items()
+                        }
                     logger.info(
                         "scan_and_expand_universe: cached universe too small (active=%d, known=%d, min_cached=%d), forcing full rescan",
                         len(active),
