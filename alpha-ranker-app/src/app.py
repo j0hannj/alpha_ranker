@@ -1151,12 +1151,18 @@ class AlphaRanker(ctk.CTk):
                 strat=str(strat_override)
             holding_days=p.get("expected_holding_period") or p.get("holding_horizon") or horizon_days
             action=p.get("action") or "BUY"
+            # Sector display in proposals: robust to NaN / floats
+            sector_val_p = p.get("sector")
+            if sector_val_p is None or (isinstance(sector_val_p, float) and sector_val_p != sector_val_p):
+                sector_disp_p = ""
+            else:
+                sector_disp_p = str(sector_val_p)[:14]
             proposals.append({
                 "action":action,
                 "src": "SELL" if action=="SELL" else p.get("src","?"),
                 "ticker":p["ticker"],
                 "name":p.get("name","")[:22],
-                "sector":p.get("sector","")[:14],
+                "sector":sector_disp_p,
                 "alpha_score":alpha_str,
                 "alpha_score_num":p.get("alpha_score"),
                 "confidence":p.get("confidence"),
@@ -1272,9 +1278,34 @@ class AlphaRanker(ctk.CTk):
             consensus=p.get("model_consensus_score"); consensus_str=f"{consensus:.2f}" if consensus is not None and _ok(consensus) else "-"
             src=p.get("src","?")
             tag="etf" if src=="ETF" else "neg" if src=="SELL" else "ai" if src=="AI" else "stock"
-            self.bld_tree.insert("","end",values=(src,get_display_id(tk,imap),tk,p.get("name","")[:22],
-                p.get("sector","")[:14],alpha,conf_str,price_str,f"{alloc:,.0f}",shares,horizon_str,target_str,stop_str,consensus_str,
-                p.get("reason","")[:40]),tags=(tag,))
+            # Sector display in build tree: robust to NaN / floats
+            sector_val_b = p.get("sector")
+            if sector_val_b is None or (isinstance(sector_val_b, float) and sector_val_b != sector_val_b):
+                sector_disp_b = ""
+            else:
+                sector_disp_b = str(sector_val_b)[:14]
+            self.bld_tree.insert(
+                "",
+                "end",
+                values=(
+                    src,
+                    get_display_id(tk, imap),
+                    tk,
+                    p.get("name", "")[:22],
+                    sector_disp_b,
+                    alpha,
+                    conf_str,
+                    price_str,
+                    f"{alloc:,.0f}",
+                    shares,
+                    horizon_str,
+                    target_str,
+                    stop_str,
+                    consensus_str,
+                    p.get("reason", "")[:40],
+                ),
+                tags=(tag,),
+            )
         self.bld_summary.configure(
             text=f"Total: {total:,.0f} EUR ({n} trades, {n*fees:.0f} fees) | Budget: {budget:,.0f} EUR | "
                  f"Remaining: {budget-total:,.0f} EUR")
