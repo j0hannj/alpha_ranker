@@ -81,19 +81,178 @@ def _yf_screen(query_body: dict, size: int = 250, offset: int = 0):
     return {"quotes": quotes, "total": total}
 
 
+WIKIPEDIA_INDICES = [
+    {"name": "S&P 500", "url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "suffix": "", "fix_dots": True},
+    {"name": "Nasdaq 100", "url": "https://en.wikipedia.org/wiki/Nasdaq-100", "suffix": "", "fix_dots": True},
+    {"name": "FTSE 100", "url": "https://en.wikipedia.org/wiki/FTSE_100_Index", "suffix": ".L", "fix_dots": False},
+    {"name": "DAX 40", "url": "https://en.wikipedia.org/wiki/DAX", "suffix": ".DE", "fix_dots": False},
+    {"name": "CAC 40", "url": "https://en.wikipedia.org/wiki/CAC_40", "suffix": ".PA", "fix_dots": False},
+    {"name": "Euro Stoxx 50", "url": "https://en.wikipedia.org/wiki/EURO_STOXX_50", "suffix": "", "fix_dots": False},
+    {"name": "SMI", "url": "https://en.wikipedia.org/wiki/Swiss_Market_Index", "suffix": ".SW", "fix_dots": False},
+]
+
+
+def _discover_from_wikipedia(callback=None):
+    """Scrape Wikipedia pour les constituants de plusieurs grands indices mondiaux."""
+    discovered: dict[str, dict] = {}
+    for idx in WIKIPEDIA_INDICES:
+        try:
+            if callback:
+                callback(f"Wikipedia: {idx['name']}...")
+            tables = pd.read_html(idx["url"])
+            ticker_col = None
+            target_table = None
+            for t in tables:
+                for col in t.columns:
+                    col_str = str(col).lower()
+                    if any(x in col_str for x in ["ticker", "symbol", "epic", "code", "stock"]):
+                        sample = t[col].dropna().astype(str).head(5).tolist()
+                        if sample and all(len(s.strip()) < 15 for s in sample):
+                            ticker_col = col
+                            target_table = t
+                            break
+                if ticker_col:
+                    break
+            if target_table is None:
+                logger.warning("Wikipedia %s: no ticker column found", idx["name"])
+                if callback:
+                    callback(f"  {idx['name']}: no ticker column found, skipping")
+                continue
+            count = 0
+            for raw in target_table[ticker_col].dropna().astype(str):
+                tck = raw.strip()
+                if not tck or len(tck) > 15:
+                    continue
+                if tck.lower() in ("ticker", "symbol", "code", "epic", "stock"):
+                    continue
+                if idx.get("fix_dots"):
+                    tck = tck.replace(".", "-")
+                if idx.get("suffix") and "." not in tck:
+                    tck = tck + idx["suffix"]
+                if tck not in discovered:
+                    discovered[tck] = {"source": f"wikipedia_{idx['name']}"}
+                    count += 1
+            if callback:
+                callback(f"  {idx['name']}: {count} tickers")
+        except Exception as e:
+            logger.warning("Wikipedia %s failed: %s", idx["name"], e)
+            if callback:
+                callback(f"  {idx['name']} ERROR: {e}")
+    if callback:
+        callback(f"Wikipedia total: {len(discovered)} unique tickers")
+    return discovered
+
+
+def _discover_from_yf_search(callback=None):
+    """Découverte thématique via yfinance.Search."""
+    import yfinance as yf
+
+    discovered: dict[str, dict] = {}
+    queries = [
+        "technology stocks large cap",
+        "healthcare stocks large cap",
+        "financial stocks large cap",
+        "energy stocks large cap",
+        "consumer stocks large cap",
+        "industrial stocks large cap",
+        "semiconductor stocks",
+        "biotech stocks",
+        "software stocks",
+        "renewable energy stocks",
+        "AI artificial intelligence stocks",
+        "cloud computing stocks",
+        "cybersecurity stocks",
+        "electric vehicle stocks",
+        "European large cap stocks",
+        "UK large cap stocks",
+        "German stocks DAX",
+        "French stocks CAC",
+        "Swiss stocks",
+    ]
+    for query in queries:
+        try:
+            res = yf.Search(query)
+            quotes = getattr(res, "quotes", None)
+            if not quotes:
+                continue
+            if not isinstance(quotes, list):
+                quotes = list(quotes)
+            count = 0
+            for q in quotes[:30]:
+                sym = q.get("symbol") if isinstance(q, dict) else getattr(q, "symbol", None)
+                if sym and isinstance(sym, str) and sym not in discovered:
+                    discovered[sym] = {
+                        "shortName": q.get("shortname") or q.get("longname") if isinstance(q, dict) else None,
+                        "exchange": q.get("exchange") if isinstance(q, dict) else None,
+                        "source": "yf_search",
+                    }
+                    count += 1
+            if callback and count:
+                callback(f"  Search '{query}': +{count}")
+        except Exception as e:
+            logger.warning("yfinance Search '%s' failed: %s", query, e)
+            if callback:
+                callback(f"  Search error for '{query}': {e}")
+    if callback:
+        callback(f"  yf.Search total: {len(discovered)} tickers")
+    return discovered
+
+
+def _discover_from_fmp_search(callback=None):
+    """Découverte via FMP /api/v3/search (gratuit)."""
+    api_key = os.environ.get("FMP_API_KEY")
+    if not api_key:
+        return {}
+    discovered: dict[str, dict] = {}
+    searches = [
+        "technology",
+        "healthcare",
+        "financial",
+        "energy",
+        "consumer",
+        "industrial",
+        "semiconductor",
+        "software",
+        "pharma",
+        "telecom",
+        "mining",
+        "luxury",
+    ]
+    for term in searches:
+        for exchange in ["NASDAQ", "NYSE", "EURONEXT", "XETRA", "LSE"]:
+            try:
+                url = (
+                    "https://financialmodelingprep.com/api/v3/search"
+                    f"?query={term}&limit=50&exchange={exchange}&apikey={api_key}"
+                )
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    data = json.loads(r.read().decode())
+                for item in data or []:
+                    sym = item.get("symbol")
+                    if sym and sym not in discovered:
+                        discovered[sym] = {
+                            "shortName": item.get("name"),
+                            "exchange": item.get("exchangeShortName"),
+                            "source": "fmp_search",
+                        }
+            except Exception as e:
+                logger.warning("FMP search '%s' on %s failed: %s", term, exchange, e)
+                if callback:
+                    callback(f"  FMP search '{term}' {exchange} error: {e}")
+    if callback:
+        callback(f"  FMP search: {len(discovered)} tickers")
+    return discovered
+
+
 def scan_and_expand_universe(callback=None):
     """
-    Découvrir de nouvelles actions via le screener Yahoo Finance (yfinance), sans dépendre de FMP.
-
-    Pipeline:
-      1) Screener par région (intradaymarketcap + region)
-      2) Optionnel: screeners prédéfinis (most_actives, growth_technology_stocks, ...)
-      3) Merge avec l'univers connu (DB table universe)
-      4) Mise à jour discovered_at / last_seen_at
-      5) Sauvegarde en DB
-      6) Retour de l'univers ACTIF filtré par market cap min (configurable)
+    Découvrir des actions en combinant uniquement les sources qui marchent actuellement:
+    - Wikipedia (indices majeurs)
+    - yfinance.Search (requêtes thématiques)
+    - FMP /api/v3/search (gratuit, si clé dispo)
     """
-    logger.info("scan_and_expand_universe: start (Yahoo Finance screener)")
+    logger.info("scan_and_expand_universe: start (Wikipedia + yf.Search + FMP search)")
     try:
         from . import portfolio
         from .engine_config import get_universe_settings
@@ -104,11 +263,10 @@ def scan_and_expand_universe(callback=None):
     uv = get_universe_settings()
     logger.info("scan_and_expand_universe: universe_settings=%s", uv)
 
-    # Market cap min pour l'univers ACTIF
     min_cap_cfg = uv.get("fmp_min_market_cap")
     min_cap = int(min_cap_cfg) if isinstance(min_cap_cfg, (int, float)) else 0
 
-    # Gestion cache: si dernier scan récent ET univers DB suffisamment gros, on le réutilise
+    # Cache: si scan récent et univers assez gros, réutiliser
     scan_freq_h = uv.get("scan_frequency_hours", 24)
     if scan_freq_h and scan_freq_h > 0:
         try:
@@ -159,181 +317,97 @@ def scan_and_expand_universe(callback=None):
         except Exception as e:
             logger.debug("scan_and_expand_universe cache check failed: %s", e)
 
-    # 1) Screener par région
-    regions = [
-        ("us", "US"),
-        ("gb", "UK"),
-        ("de", "Germany"),
-        ("fr", "France"),
-        ("nl", "Netherlands"),
-        ("ch", "Switzerland"),
-        ("it", "Italy"),
-        ("es", "Spain"),
-    ]
-
     discovered: dict[str, dict] = {}
-    per_region_limit = int(uv.get("yf_region_max_per_region", 1000))
 
-    for region_code, region_name in regions:
-        try:
-            query_body = {
-                "operator": "and",
-                "operands": [
-                    {"operator": "gt", "operands": ["intradaymarketcap", max(min_cap, 0)]},
-                    {"operator": "eq", "operands": ["region", region_code]},
-                ],
-            }
-            offset = 0
-            region_total = 0
-            if callback:
-                callback(f"Scanning {region_name} via Yahoo screener...")
-            while True:
-                try:
-                    res = _yf_screen(query_body, size=250, offset=offset)
-                except Exception as e:
-                    logger.warning("scan_and_expand_universe: yf screener %s offset=%d failed: %s", region_code, offset, e)
-                    if callback:
-                        callback(f"  {region_name} error at offset {offset}: {e}")
-                    break
-                quotes = res.get("quotes") or []
-                total_available = int(res.get("total") or 0)
-                if not quotes:
-                    break
-                for stock in quotes:
-                    sym = (stock.get("symbol") or stock.get("ticker") or "").strip()
-                    if not sym:
-                        continue
-                    discovered[sym] = {
-                        "shortName": stock.get("shortName") or stock.get("longName") or sym,
-                        "sector": stock.get("sector"),
-                        "industry": stock.get("industry"),
-                        "marketCap": stock.get("marketCap"),
-                        "currentPrice": stock.get("regularMarketPrice"),
-                        "exchange": stock.get("exchange"),
-                        "country": stock.get("region") or region_name,
-                        "source": f"yf_region_{region_code}",
-                    }
-                region_total += len(quotes)
-                if callback:
-                    callback(f"  {region_name}: {region_total}/{total_available or '?'} stocks")
-                offset += 250
-                if total_available and offset >= total_available:
-                    break
-                if region_total >= per_region_limit:
-                    break
-            logger.info("scan_and_expand_universe: %s region -> %d stocks (limit %d)", region_name, region_total, per_region_limit)
-        except Exception as e:
-            logger.warning("scan_and_expand_universe: region %s failed: %s", region_name, e)
-            if callback:
-                callback(f"  {region_name} error: {e}")
-
-    # 2) Screeners prédéfinis (optionnels)
-    predefined_screens = [
-        "most_actives",
-        "undervalued_large_caps",
-        "growth_technology_stocks",
-        "undervalued_growth_stocks",
-        "aggressive_small_caps",
-        "small_cap_gainers",
-    ]
-    try:
-        import yfinance as yf
-        Screener = getattr(yf, "Screener", None)
-    except Exception:
-        Screener = None
-
-    if Screener is not None:
-        try:
-            sc = Screener()
-            for screen_name in predefined_screens:
-                try:
-                    if callback:
-                        callback(f"Predefined Yahoo screen: {screen_name}...")
-                    sc.set_screen(screen_name)
-                    resp = getattr(sc, "response", None) or {}
-                    quotes = resp.get("quotes") or []
-                    added = 0
-                    for stock in quotes:
-                        sym = (stock.get("symbol") or stock.get("ticker") or "").strip()
-                        if not sym or sym in discovered:
-                            continue
-                        discovered[sym] = {
-                            "shortName": stock.get("shortName") or stock.get("longName") or sym,
-                            "sector": stock.get("sector"),
-                            "industry": stock.get("industry"),
-                            "marketCap": stock.get("marketCap"),
-                            "currentPrice": stock.get("regularMarketPrice"),
-                            "exchange": stock.get("exchange"),
-                            "country": stock.get("region"),
-                            "source": f"yf_predef_{screen_name}",
-                        }
-                        added += 1
-                    if callback and added:
-                        callback(f"  Predefined '{screen_name}': +{added} new")
-                except Exception as e:
-                    logger.warning("scan_and_expand_universe: predefined screen %s failed: %s", screen_name, e)
-        except Exception as e:
-            logger.debug("scan_and_expand_universe: Screener class not usable: %s", e)
-
-    logger.info("scan_and_expand_universe: total discovered (raw)=%d", len(discovered))
+    # 1) Wikipedia
+    wiki = _discover_from_wikipedia(callback)
+    for k, v in wiki.items():
+        discovered.setdefault(k, {}).update(v)
     if callback:
-        callback(f"Total discovered (raw): {len(discovered)} unique stocks")
+        callback(f"After Wikipedia: {len(discovered)} tickers")
 
-    # 3) Merge avec univers connu en DB et sauvegarde
-    try:
-        known = portfolio.get_universe() or {}
-        known_set = set(known.keys())
-        new_tickers = set(discovered.keys()) - known_set
+    # 2) yfinance.Search
+    yf_search = _discover_from_yf_search(callback)
+    for k, v in yf_search.items():
+        if k not in discovered:
+            discovered[k] = v
+    if callback:
+        callback(f"After yf.Search: {len(discovered)} tickers")
+
+    # 3) FMP search
+    fmp = _discover_from_fmp_search(callback)
+    for k, v in fmp.items():
+        if k not in discovered:
+            discovered[k] = v
+    if callback:
+        callback(f"Total discovered (raw): {len(discovered)} unique tickers")
+    logger.info("scan_and_expand_universe: total discovered (raw)=%d", len(discovered))
+
+    # 4) Merge avec univers connu, enrichir via FMP profile si dispo
+    api_key = os.environ.get("FMP_API_KEY")
+    known = portfolio.get_universe() or {}
+    known_set = set(known.keys())
+    new_tickers = set(discovered.keys()) - known_set
+    if callback:
+        callback(f"Known: {len(known_set)} | New discoveries: {len(new_tickers)}")
+
+    profiles = {}
+    if api_key and new_tickers:
+        to_enrich = list(new_tickers)
+        max_enrich = int(uv.get("max_profile_enrichment", 2000))
+        to_enrich = to_enrich[:max_enrich]
         if callback:
-            callback(f"Known: {len(known_set)} | New discoveries: {len(new_tickers)}")
-        now_iso = datetime.now().isoformat()
-        today = datetime.now().strftime("%Y-%m-%d")
-        full_universe: dict[str, dict] = dict(known)
-        for sym, info in discovered.items():
-            base = full_universe.get(sym, {})
-            full_universe[sym] = {
-                "shortName": info.get("shortName") or base.get("shortName") or sym,
-                "sector": info.get("sector") or base.get("sector"),
-                "industry": info.get("industry") or base.get("industry"),
-                "marketCap": info.get("marketCap") or base.get("marketCap"),
-                "currentPrice": info.get("currentPrice") or base.get("currentPrice"),
-                "country": info.get("country") or base.get("country"),
-                "exchange": info.get("exchange") or base.get("exchange"),
-                "date": today,
-                "discovered_at": base.get("discovered_at") or (now_iso if sym in new_tickers else None),
-                "last_seen_at": now_iso,
-            }
-        logger.info("scan_and_expand_universe: saving universe of %d tickers to DB", len(full_universe))
-        portfolio.save_universe(full_universe)
-        try:
-            portfolio.set_setting("universe_last_scan", now_iso)
-        except Exception as e:
-            logger.warning("scan_and_expand_universe: failed to persist universe_last_scan: %s", e)
-        logger.info("scan_and_expand_universe: end")
-        # 4) Univers ACTIF filtré par market cap
-        active = {
-            t: {
-                "shortName": info.get("shortName") or t,
-                "sector": info.get("sector"),
-                "industry": info.get("industry"),
-                "marketCap": info.get("marketCap"),
-                "currentPrice": info.get("currentPrice"),
-                "country": info.get("country"),
-                "exchange": info.get("exchange"),
-                "date": today,
-                "discovered_at": info.get("discovered_at"),
-            }
-            for t, info in full_universe.items()
-            if (info.get("marketCap") or 0) >= min_cap
+            callback(f"Enriching {len(to_enrich)} stocks via FMP profile...")
+        profiles = _enrich_with_profiles(to_enrich, api_key, callback)
+
+    now_iso = datetime.now().isoformat()
+    today = datetime.now().strftime("%Y-%m-%d")
+    full_universe: dict[str, dict] = dict(known)
+    for sym, base_info in discovered.items():
+        base = full_universe.get(sym, {})
+        prof = profiles.get(sym) if profiles else {}
+        full_universe[sym] = {
+            "shortName": prof.get("shortName") or base_info.get("shortName") or base.get("shortName") or sym,
+            "sector": prof.get("sector") or base_info.get("sector") or base.get("sector"),
+            "industry": prof.get("industry") or base_info.get("industry") or base.get("industry"),
+            "marketCap": prof.get("marketCap") or base_info.get("marketCap") or base.get("marketCap"),
+            "currentPrice": prof.get("currentPrice") or base_info.get("currentPrice") or base.get("currentPrice"),
+            "country": base_info.get("country") or base.get("country"),
+            "exchange": base_info.get("exchange") or base.get("exchange"),
+            "date": today,
+            "discovered_at": base.get("discovered_at") or (now_iso if sym in new_tickers else None),
+            "last_seen_at": now_iso,
         }
-        logger.info("scan_and_expand_universe: active universe size=%d (min_mcap=%s)", len(active), min_cap)
-        if callback:
-            human_cap = f"{min_cap/1e9:.1f}B" if min_cap >= 1e9 else f"{min_cap/1e6:.1f}M"
-            callback(f"Active universe: {len(active)} stocks (mcap >= {human_cap})")
-        return active
+
+    logger.info("scan_and_expand_universe: saving universe of %d tickers to DB", len(full_universe))
+    portfolio.save_universe(full_universe)
+    try:
+        portfolio.set_setting("universe_last_scan", now_iso)
     except Exception as e:
-        logger.warning("scan_and_expand_universe: universe save/merge failed: %s", e)
-        return discovered
+        logger.warning("scan_and_expand_universe: failed to persist universe_last_scan: %s", e)
+    logger.info("scan_and_expand_universe: end")
+
+    # 5) Univers ACTIF filtré par market cap
+    active = {
+        t: {
+            "shortName": info.get("shortName") or t,
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "marketCap": info.get("marketCap"),
+            "currentPrice": info.get("currentPrice"),
+            "country": info.get("country"),
+            "exchange": info.get("exchange"),
+            "date": today,
+            "discovered_at": info.get("discovered_at"),
+        }
+        for t, info in full_universe.items()
+        if (info.get("marketCap") or 0) >= min_cap
+    }
+    logger.info("scan_and_expand_universe: active universe size=%d (min_mcap=%s)", len(active), min_cap)
+    if callback:
+        human_cap = f"{min_cap/1e9:.1f}B" if min_cap >= 1e9 else f"{min_cap/1e6:.1f}M"
+        callback(f"Active universe: {len(active)} stocks (mcap >= {human_cap})")
+    return active
 
 
 def _fetch_all_traded(api_key: str, uv: dict, callback=None):
