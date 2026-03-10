@@ -103,8 +103,79 @@ def _conn():
         signal_data TEXT,
         executed_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS universe (
+        ticker TEXT PRIMARY KEY,
+        name TEXT,
+        sector TEXT,
+        industry TEXT,
+        market_cap REAL,
+        country TEXT,
+        exchange TEXT,
+        discovered_at TEXT,
+        last_seen_at TEXT,
+        is_active INTEGER DEFAULT 1
+    )""")
     c.commit()
     return c
+
+
+def get_universe():
+    """Load known universe from DB. Returns dict ticker -> {shortName, sector, industry, marketCap, country, exchange, discovered_at, last_seen_at}."""
+    c = _conn()
+    try:
+        rows = c.execute("SELECT ticker, name, sector, industry, market_cap, country, exchange, discovered_at, last_seen_at FROM universe WHERE is_active = 1").fetchall()
+        c.close()
+        return {
+            r["ticker"]: {
+                "shortName": r["name"] or r["ticker"],
+                "sector": r["sector"],
+                "industry": r["industry"],
+                "marketCap": r["market_cap"],
+                "country": r["country"],
+                "exchange": r["exchange"],
+                "discovered_at": r["discovered_at"],
+                "last_seen_at": r["last_seen_at"],
+            }
+            for r in rows
+        }
+    except Exception as e:
+        logger.warning("get_universe failed: %s", e)
+        try:
+            c.close()
+        except Exception:
+            pass
+        return {}
+
+
+def save_universe(stocks_dict):
+    """Save/update universe in DB. New tickers get discovered_at=now; existing get last_seen_at=now."""
+    if not stocks_dict:
+        return
+    c = _conn()
+    now = datetime.now().isoformat()
+    try:
+        for ticker, info in stocks_dict.items():
+            name = info.get("name") or info.get("shortName") or info.get("companyName") or ticker
+            sector = info.get("sector")
+            industry = info.get("industry")
+            market_cap = info.get("marketCap") or info.get("market_cap")
+            country = info.get("country")
+            exchange = info.get("exchange") or info.get("exchangeShortName")
+            existing = c.execute("SELECT 1 FROM universe WHERE ticker = ?", (ticker,)).fetchone()
+            if existing:
+                c.execute("""UPDATE universe SET name=?, sector=?, industry=?, market_cap=?,
+                            country=?, exchange=?, last_seen_at=?, is_active=1 WHERE ticker=?""",
+                         (name, sector, industry, market_cap, country, exchange, now, ticker))
+            else:
+                c.execute("""INSERT INTO universe (ticker, name, sector, industry, market_cap,
+                            country, exchange, discovered_at, last_seen_at, is_active)
+                            VALUES (?,?,?,?,?,?,?,?,?,1)""",
+                         (ticker, name, sector, industry, market_cap, country, exchange, now, now))
+        c.commit()
+    except Exception as e:
+        logger.warning("save_universe failed: %s", e)
+    finally:
+        c.close()
 
 def get_all(include_sold=False):
     """Return holdings. By default only OPEN (exclude SOLD). Use include_sold=True for history."""
