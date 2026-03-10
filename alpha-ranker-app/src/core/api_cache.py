@@ -62,7 +62,7 @@ def get_cache_status():
     État du cache: nb entrées par source, années disponibles, nombre de tickers/ISIN.
     Utile pour suivre sans ouvrir la DB à la main.
     """
-    out = {"path": get_cache_path(), "total": 0, "by_source": {}, "prices_yearly_years": [], "n_tickers": None}
+    out = {"path": get_cache_path(), "total": 0, "by_source": {}, "prices_yearly_years": [], "prices_monthly_periods": [], "n_tickers": None}
     try:
         c = _conn()
         rows = c.execute(
@@ -74,7 +74,10 @@ def get_cache_status():
             out["by_source"][source] = out["by_source"].get(source, 0) + 1
             if source == "prices_yearly":
                 out["prices_yearly_years"].append({"year": cache_key, "fetched_at": fetched_at})
+            if source == "prices_monthly":
+                out["prices_monthly_periods"].append({"period": cache_key, "fetched_at": fetched_at})
         out["prices_yearly_years"].sort(key=lambda x: x["year"])
+        out["prices_monthly_periods"].sort(key=lambda x: x["period"])
         # Nombre de tickers: depuis universe_meta si présent, sinon nb de yahoo_info (proxy)
         meta = get("universe_meta", "count", max_age_hours=24 * 365 * 20)
         if isinstance(meta, dict) and "n_tickers" in meta:
@@ -196,7 +199,7 @@ def get_display_id(ticker, isin_map=None):
 def clear_older_than_days(days: int = 30, exclude_sources=None):
     """Remove cache entries older than `days`. Never touch exclude_sources (e.g. prices_yearly, universe_list)."""
     if exclude_sources is None:
-        exclude_sources = ("prices_yearly", "universe_list")
+        exclude_sources = ("prices_yearly", "prices_monthly", "universe_list")
     try:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         c = _conn()
