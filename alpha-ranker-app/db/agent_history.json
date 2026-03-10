@@ -1,14 +1,6 @@
 [
   {
     "role": "user",
-    "content": "The quantitative engine proposed this portfolio (budget 2000.0 EUR, fees 10.0/trade):\n[\n  {\n    \"src\": \"ETF\",\n    \"ticker\": \"IWDA.AS\",\n    \"name\": \"iShares MSCI World\",\n    \"sector\": \"Global\",\n    \"alpha_score\": \"-\",\n    \"alloc\": 1020,\n    \"shares\": 0,\n    \"reason\": \"Core diversification\"\n  },\n  {\n    \"src\": \"ETF\",\n    \"ticker\": \"VWCE.DE\",\n    \"name\": \"Vanguard All-World\",\n    \"sector\": \"Global\",\n    \"alpha_score\": \"-\",\n    \"alloc\": 680,\n    \"shares\": 0,\n    \"reason\": \"Core diversification\"\n  },\n  {\n    \"src\": \"Model\",\n    \"ticker\": \"NET\",\n    \"name\": \"Cloudflare, Inc.\",\n    \"sector\": \"Technology\",\n    \"alpha_score\": \"+233.3%\",\n    \"alloc\": 69,\n    \"shares\": 0,\n    \"reason\": \"Rank #1, Med conviction\"\n  },\n  {\n    \"src\": \"Model\",\n    \"ticker\": \"HII\",\n    \"name\": \"Huntington Ingalls Ind\",\n    \"sector\": \"Industrials\",\n    \"alpha_score\": \"+176.3%\",\n    \"alloc\": 52,\n    \"shares\": 0,\n    \"reason\": \"Rank #2, Low conviction\"\n  },\n  {\n    \"src\": \"Model\",\n    \"ticker\": \"APP\",\n    \"name\": \"Applovin Corporation\",\n    \"sector\": \"Communication \",\n    \"alpha_score\": \"+174.0%\",\n    \"alloc\": 51,\n    \"shares\": 0,\n    \"reason\": \"Rank #3, Low conviction\"\n  }\n]\n\nReview this proposal considering: current macro environment, news sentiment, the user's existing portfolio, and sector risks.\nSuggest specific adjustments: which positions to KEEP, REMOVE, or SWAP.\nGive a short rationale for each change.\nThen output the adjusted proposal as a JSON array with keys: src (set to 'AI'), ticker, name, sector, alpha_score, alloc, shares, reason.\nKEEP the total close to 2000.0 EUR. Output ONLY the JSON array at the end."
-  },
-  {
-    "role": "assistant",
-    "content": "[\n  {\n    \"src\": \"AI\",\n    \"ticker\": \"IWDA.AS\",\n    \"name\": \"iShares MSCI World\",\n    \"sector\": \"Global\",\n    \"alpha_score\": \"-\",\n    \"alloc\": 1020,\n    \"shares\": 0,\n    \"reason\": \"Core diversification, stable macro\"\n  },\n  {\n    \"src\": \"AI\",\n    \"ticker\": \"VWCE.DE\",\n    \"name\": \"Vanguard All-World\",\n    \"sector\": \"Global\",\n    \"alpha_score\": \"-\",\n    \"alloc\": 680,\n    \"shares\": 0,\n    \"reason\": \"Core diversification, low sector bias\"\n  },\n  {\n    \"src\": \"AI\",\n    \"ticker\": \"NET\",\n    \"name\": \"Cloudflare, Inc.\",\n    \"sector\": \"Technology\",\n    \"alpha_score\": \"+233.3%\",\n    \"alloc\": 69,\n    \"shares\": 0,\n    \"reason\": \"Rank #1, high conviction, keeps tech tilt\"\n  },\n  {\n    \"src\": \"AI\",\n    \"ticker\": \"LMT\",\n    \"name\": \"Lockheed Martin Corp\",\n    \"sector\": \"Industrials\",\n    \"alpha_score\": \"+200.0%\",\n    \"alloc\": 52,\n    \"shares\": 0,\n    \"reason\": \"Swap HII for higher conviction defense play\"\n  }\n]"
-  },
-  {
-    "role": "user",
     "content": "Analyze portfolio"
   },
   {
@@ -198,5 +190,13 @@
   {
     "role": "assistant",
     "content": "PORTFOLIO: +868 EUR (+3,5 %). Gains dominés par IWDA.AS (+2,9 %) et VWCE.DE (+14,4 %). Tech en baisse: AAPL –2,8 %, AMZN –5,4 %, MSFT –14,5 %, PLTR –14,3 %; IONQ chute brutale –19,3 %.  \nMARCHÉ: [ACTION:search_news:European markets overnight]  \nACTUALITÉS: [ACTION:search_news:AAPL] [ACTION:search_news:AMZN] [ACTION:search_news:MSFT] [ACTION:search_news:PLTR] [ACTION:search_news:IONQ]  \nACTION: Réduisez l’exposition tech en vendant une partie de MSFT et PLTR ou en liquidant IONQ pour limiter la volatilité."
+  },
+  {
+    "role": "user",
+    "content": "Give me a SHORT morning market briefing in French. Include:\n1. How my portfolio is doing today (use the P&L data you have)\n2. Key market moves overnight (search news)\n3. Any news affecting my holdings specifically\n4. One actionable insight\nKeep it under 150 words. No greetings, go straight to the data."
+  },
+  {
+    "role": "assistant",
+    "content": "PORTFOLIO : +868 EUR (+3,5 %). Gains dominés par IWDA.AS (+2,9 %) et VWCE.DE (+14,4 %). Tech en baisse : AAPL –2,8 %, AMZN –5,4 %, MSFT –14,5 %, PLTR –14,3 %, IONQ –19,3 %.  \nMARCHÉ : [ACTION:search_news:European markets overnight]  \nACTUALITÉS : [ACTION:search_news:AAPL] [ACTION:search_news:AMZN] [ACTION:search_news:MSFT] [ACTION:search_news:PLTR] [ACTION:search_news:IONQ]  \nACTION : Réduisez l’exposition tech en vendant une partie de MSFT et PLTR ou en liquidant IONQ pour limiter la volatilité."
   }
 ]
