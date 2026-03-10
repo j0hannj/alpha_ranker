@@ -125,31 +125,38 @@ def _dataframe_from_cache_dict(cached):
 
 def fetch_universe(years=5, callback=None):
     """
-    Univers via get_universe_tickers (objectif 2500+). Prix année par année: 2011 → sauvegarde → 2012 → …
-    Premier fetch long, ensuite on ne requête que l'année courante. Reprise possible (checkpoint par année).
+    Univers via get_universe_tickers (objectif 2500+). Prix mois par mois (cache et reprise par mois).
     """
     import yfinance as yf
     from .api_cache import get as cache_get, set as cache_set
 
     start_year, max_history_years, _ = _get_data_config()
-    end_year = datetime.now().year
+    now = datetime.now()
+    end_year, end_month = now.year, now.month
     start_year = max(start_year, end_year - max_history_years + 1)
-    year_list = list(range(start_year, end_year + 1))
-    if not year_list:
-        year_list = [end_year]
+    month_list = []
+    for y in range(start_year, end_year + 1):
+        m_start = 1 if y > start_year else 1
+        m_end = end_month if y == end_year else 12
+        for m in range(m_start, m_end + 1):
+            month_list.append((y, m))
+    if not month_list:
+        month_list = [(end_year, end_month)]
 
     if callback:
         try:
             from .api_cache import get_cache_status
             st = get_cache_status()
             path_short = str(Path(st["path"]).parent.name) + "/" + Path(st["path"]).name
-            years_cached = [x["year"] for x in st["prices_yearly_years"]]
-            n_tk = st.get("n_tickers")
-            tick_str = f" | {n_tk} tickers" if n_tk is not None else ""
-            if years_cached:
-                callback(f"Cache: {path_short}{tick_str} | {len(years_cached)} années ({min(years_cached)}..{max(years_cached)})")
+            periods = getattr(st, "prices_monthly_periods", None) or st.get("prices_monthly_periods", [])
+            if isinstance(periods, list) and periods:
+                p_min = min(x.get("period", x) for x in periods) if periods else ""
+                p_max = max(x.get("period", x) for x in periods) if periods else ""
+                callback(f"Cache: {path_short} | {len(periods)} mois ({p_min}..{p_max})")
             else:
-                callback(f"Cache: {path_short}{tick_str} | aucune année encore (premier run long)")
+                n_tk = st.get("n_tickers")
+                tick_str = f" | {n_tk} tickers" if n_tk is not None else ""
+                callback(f"Cache: {path_short}{tick_str} | premier run (mois par mois)")
         except Exception:
             pass
 
