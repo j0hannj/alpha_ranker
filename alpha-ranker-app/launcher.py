@@ -36,7 +36,8 @@ def show_splash():
         ico = ROOT / "icon.ico"
         if not ico.exists(): ico = BASE / "icon.ico"
         if ico.exists(): splash.iconbitmap(str(ico))
-    except: pass
+    except Exception as e:
+        logger.debug("splash iconbitmap: %s", e)
     
     # Try image splash
     splash_loaded = False
