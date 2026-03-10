@@ -977,7 +977,7 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         pass
     if callback: callback("Simple ensemble: technical + sentiment...")
     records = []
-    logger.info("train_simple: start (tickers=%d)", len(yf_fundamentals))
+    logger.info("train_simple: start (full universe=%d tickers)", len(yf_fundamentals))
     for ticker,fund in yf_fundamentals.items():
         row = {"ticker":ticker,"name":fund.get("shortName",ticker),"sector":fund.get("sector","Unknown")}
         try:
@@ -1009,7 +1009,6 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         except Exception as e:
             logger.warning("train_simple: row build for %s failed: %s", ticker, e)
     df = pd.DataFrame(records)
-    logger.info("train_simple: built dataframe with %d rows and %d columns", len(df), len(df.columns))
     if len(df)<30:
         logger.warning("train_simple: abort (only %d rows, need >=30)", len(df))
         return None,None,None,None,None,None
