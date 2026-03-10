@@ -206,14 +206,20 @@ def fetch_universe(years=5, callback=None):
     if callback:
         callback(f"Data: {len(fundamentals)}/{len(tickers)} tickers sauvegardés")
 
-    # Prix année par année: cache par an. Si nouveaux tickers ajoutés, on ne télécharge que les manquants puis fusion.
+    # Prix mois par mois: cache par mois. Si nouveaux tickers, on ne télécharge que les manquants puis fusion.
     HOURS_20Y = 24 * 365 * 20
     parts = []
-    for idx, y in enumerate(year_list):
-        is_current = y == end_year
+    for idx, (y, m) in enumerate(month_list):
+        is_current = (y == end_year and m == end_month)
         max_age_h = 24 if is_current else HOURS_20Y
-        cached = cache_get("prices_yearly", str(y), max_age_hours=max_age_h)
+        period_key = f"{y}-{m:02d}"
+        cached = cache_get("prices_monthly", period_key, max_age_hours=max_age_h)
         df = None
+        start_date = f"{y}-{m:02d}-01"
+        last_day = calendar.monthrange(y, m)[1]
+        end_date = f"{y}-{m:02d}-{last_day:02d}"
+        if is_current:
+            end_date = now.strftime("%Y-%m-%d")
         if cached is not None:
             df = _dataframe_from_cache_dict(cached)
             if df is not None and not df.empty:
@@ -229,52 +235,50 @@ def fetch_universe(years=5, callback=None):
                         tickers_in_cache = set()
                     missing = [t for t in tickers if t not in tickers_in_cache]
                     if missing:
-                        if callback:
-                            callback(f"Data: année {y} ({idx+1}/{len(year_list)}) cache + {len(missing)} nouveaux tickers")
-                        end_date = datetime.now().strftime("%Y-%m-%d") if is_current else f"{y}-12-31"
+                        if callback and (idx + 1) % 12 == 0:
+                            callback(f"Data: {period_key} ({idx+1}/{len(month_list)}) cache + {len(missing)} nouveaux")
                         try:
                             new_prices = yf.download(
-                                missing, start=f"{y}-01-01", end=end_date,
+                                missing, start=start_date, end=end_date,
                                 group_by="ticker", auto_adjust=True, threads=True, progress=False
                             )
                             if not new_prices.empty and hasattr(new_prices, "columns") and len(new_prices.columns) > 0:
                                 df = pd.concat([df, new_prices], axis=1)
                                 try:
-                                    cache_set("prices_yearly", str(y), df.to_dict(orient="split"))
+                                    cache_set("prices_monthly", period_key, df.to_dict(orient="split"))
                                 except Exception:
                                     pass
                         except Exception:
                             pass
-                    else:
-                        if callback:
-                            callback(f"Data: année {y} ({idx+1}/{len(year_list)}) cache")
+                    elif callback and (idx + 1) % 12 == 0:
+                        callback(f"Data: {period_key} ({idx+1}/{len(month_list)}) cache")
                 except Exception:
                     pass
         if df is None or df.empty:
-            if callback:
-                callback(f"Data: téléchargement année {y} ({idx+1}/{len(year_list)})…")
-            end_date = datetime.now().strftime("%Y-%m-%d") if is_current else f"{y}-12-31"
+            if callback and (idx + 1) % 12 == 1:
+                callback(f"Data: téléchargement {period_key} ({idx+1}/{len(month_list)})…")
             try:
-                year_prices = yf.download(
-                    tickers, start=f"{y}-01-01", end=end_date,
+                month_prices = yf.download(
+                    tickers, start=start_date, end=end_date,
                     group_by="ticker", auto_adjust=True, threads=True, progress=False
                 )
             except Exception:
-                year_prices = pd.DataFrame()
-            if not year_prices.empty and hasattr(year_prices, "columns") and len(year_prices.columns) > 0:
+                month_prices = pd.DataFrame()
+            if not month_prices.empty and hasattr(month_prices, "columns") and len(month_prices.columns) > 0:
                 try:
-                    cache_set("prices_yearly", str(y), year_prices.to_dict(orient="split"))
+                    cache_set("prices_monthly", period_key, month_prices.to_dict(orient="split"))
                 except Exception:
                     pass
-                if callback:
-                    callback(f"Data: année {y} sauvegardée ({idx+1}/{len(year_list)})")
-                parts.append(year_prices)
+                if callback and (idx + 1) % 12 == 1:
+                    callback(f"Data: {period_key} sauvegardé ({idx+1}/{len(month_list)})")
+                parts.append(month_prices)
         else:
             parts.append(df)
 
     if not parts:
-        end = datetime.now()
-        start = datetime(start_year, 1, 1)
+        end = now
+        y0, m0 = month_list[0][0], month_list[0][1]
+        start = datetime(y0, m0, 1)
         prices = yf.download(tickers, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"),
                             group_by="ticker", auto_adjust=True, threads=True)
     else:
