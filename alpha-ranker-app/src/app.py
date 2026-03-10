@@ -855,8 +855,34 @@ class AlphaRanker(ctk.CTk):
                         name_disp = ((r.get("name") or "")[:14] + " NEW") if len((r.get("name") or "")) > 14 else ((r.get("name") or "") + " NEW")
             except Exception:
                 pass
-            self.rk_tree.insert("","end",values=(int(r["rank"]),get_display_id(r["ticker"],imap),r["ticker"],name_disp,
-                r.get("sector","")[:14],ch_disp,stab,rd,conv,an,sn,pe,gr,fcf,mom),tags=(tag,))
+            # Sector display: be robust to NaN / floats
+            sector_val = r.get("sector")
+            if sector_val is None or (isinstance(sector_val, float) and sector_val != sector_val):
+                sector_disp = ""
+            else:
+                sector_disp = str(sector_val)[:14]
+            self.rk_tree.insert(
+                "",
+                "end",
+                values=(
+                    int(r["rank"]),
+                    get_display_id(r["ticker"], imap),
+                    r["ticker"],
+                    name_disp,
+                    sector_disp,
+                    ch_disp,
+                    stab,
+                    rd,
+                    conv,
+                    an,
+                    sn,
+                    pe,
+                    gr,
+                    fcf,
+                    mom,
+                ),
+                tags=(tag,),
+            )
 
     def _rk_tooltip_text(self, row_series, col_name):
         """Full value for tooltip by column. row_series is one row of _rankings_display_df."""
