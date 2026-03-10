@@ -24,7 +24,7 @@ def compute_stability_from_history(
     For each ticker in the current run, compute stability from DB history.
     Current run is NOT yet saved — we compare with the last N runs only.
 
-    Returns dict: ticker -> {classification, rank_delta, stability_index}.
+    Returns dict: ticker -> {classification, rank_delta, stability_index, alpha_delta, confidence_delta}.
 
     Classification:
     - "new": ticker never seen in any run
@@ -41,7 +41,7 @@ def compute_stability_from_history(
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
     except Exception:
-        return {row["ticker"]: {"classification": "new", "rank_delta": None, "stability_index": None}
+        return {row["ticker"]: {"classification": "new", "rank_delta": None, "stability_index": None, "alpha_delta": None, "confidence_delta": None}
                 for _, row in results_df.iterrows()}
 
     # Last N run timestamps (current run not in DB yet)
@@ -53,7 +53,7 @@ def compute_stability_from_history(
 
     if not run_ts_list:
         conn.close()
-        return {row["ticker"]: {"classification": "new", "rank_delta": None, "stability_index": None}
+        return {row["ticker"]: {"classification": "new", "rank_delta": None, "stability_index": None, "alpha_delta": None, "confidence_delta": None}
                 for _, row in results_df.iterrows()}
 
     placeholders = ",".join("?" * len(run_ts_list))
@@ -61,6 +61,14 @@ def compute_stability_from_history(
         f"SELECT ticker, timestamp, rank_position FROM ranking_history WHERE timestamp IN ({placeholders}) ORDER BY timestamp",
         run_ts_list,
     ).fetchall()
+
+    # Last run snapshot for alpha_delta and confidence_delta (ranking_history has alpha_score, confidence)
+    last_ts = run_ts_list[0]  # most recent run in DB
+    prev_row = conn.execute(
+        "SELECT ticker, alpha_score, rank_position, confidence FROM ranking_history WHERE timestamp = ?",
+        (last_ts,),
+    ).fetchall()
+    prev_by_ticker = {r[0]: {"alpha_score": r[1], "rank_position": r[2], "confidence": r[3]} for r in prev_row}
 
     all_known = set(
         r[0] for r in conn.execute("SELECT DISTINCT ticker FROM ranking_history").fetchall()
@@ -87,12 +95,12 @@ def compute_stability_from_history(
             current_rank = None
 
         if ticker not in all_known:
-            result[ticker] = {"classification": "new", "rank_delta": None, "stability_index": None}
+            result[ticker] = {"classification": "new", "rank_delta": None, "stability_index": None, "alpha_delta": None, "confidence_delta": None}
             continue
 
         ranks_in_runs = ticker_history.get(ticker, [])
         if not ranks_in_runs:
-            result[ticker] = {"classification": "returning", "rank_delta": None, "stability_index": None}
+            result[ticker] = {"classification": "returning", "rank_delta": None, "stability_index": None, "alpha_delta": None, "confidence_delta": None}
             continue
 
         last_rank = ranks_in_runs[-1][1]
@@ -101,8 +109,26 @@ def compute_stability_from_history(
         if current_rank is not None:
             all_ranks.append(current_rank)
 
+        # alpha_delta and confidence_delta: current (from results_df) vs last run (from DB)
+        alpha_delta = None
+        confidence_delta = None
+        prev = prev_by_ticker.get(ticker)
+        if prev is not None:
+            curr_alpha = row.get("alpha_score")
+            curr_conf = row.get("confidence")
+            if curr_alpha is not None and pd.notna(curr_alpha) and prev.get("alpha_score") is not None:
+                try:
+                    alpha_delta = float(curr_alpha) - float(prev["alpha_score"])
+                except (TypeError, ValueError):
+                    pass
+            if curr_conf is not None and pd.notna(curr_conf) and prev.get("confidence") is not None:
+                try:
+                    confidence_delta = float(curr_conf) - float(prev["confidence"])
+                except (TypeError, ValueError):
+                    pass
+
         if len(all_ranks) < 2:
-            result[ticker] = {"classification": "insufficient_data", "rank_delta": delta, "stability_index": None}
+            result[ticker] = {"classification": "insufficient_data", "rank_delta": delta, "stability_index": None, "alpha_delta": alpha_delta, "confidence_delta": confidence_delta}
             continue
 
         std = float(np.std(all_ranks))
@@ -128,6 +154,8 @@ def compute_stability_from_history(
             "classification": classification,
             "rank_delta": int(delta) if delta is not None else None,
             "stability_index": round(std, 2),
+            "alpha_delta": round(alpha_delta, 4) if alpha_delta is not None else None,
+            "confidence_delta": round(confidence_delta, 4) if confidence_delta is not None else None,
         }
 
     return result
@@ -258,6 +286,8 @@ def add_ranking_insights(
         out = current_df.copy()
         out["rank_delta"] = out["ticker"].map(lambda t: stability.get(t, {}).get("rank_delta"))
         out["stability_index"] = out["ticker"].map(lambda t: stability.get(t, {}).get("stability_index"))
+        out["alpha_delta"] = out["ticker"].map(lambda t: stability.get(t, {}).get("alpha_delta"))
+        out["confidence_delta"] = out["ticker"].map(lambda t: stability.get(t, {}).get("confidence_delta"))
         out["movement_classification"] = out["ticker"].map(
             lambda t: stability.get(t, {}).get("classification", "unknown")
         )

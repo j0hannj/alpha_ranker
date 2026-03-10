@@ -116,6 +116,7 @@ DEFAULT_PORTFOLIO_SETTINGS = {
     "max_positions": 10,
     "max_position_pct": 0.15,
     "min_return_vs_cost_multiple": 3.0,
+    "minimum_expected_alpha": 0.01,  # Min net expected return (fraction, e.g. 0.01 = 1%) after transaction costs
     "holding_horizon_days": 365,
     "default_stop_loss_pct": 10.0,
     # Per-strategy default horizons (days)

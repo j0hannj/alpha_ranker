@@ -1,12 +1,11 @@
 """
 Transaction cost modeling for the portfolio decision engine.
 
-Why transaction costs must be modeled:
-- Every trade incurs costs (broker fees, bid-ask spread, slippage). Ignoring them
-  leads to over-trading and recommendations that are not economically viable.
-- The model must reject buys where expected return is too small relative to
-  transaction cost (e.g. expected_return >= 3 × transaction_cost) so that only
-  trades with a sufficient edge are suggested.
+Trades are evaluated on net expected return after costs:
+  net_expected_return = expected_return - transaction_cost (as fraction of notional)
+Assets are rejected only when net expected return is negative or below a small
+configurable minimum (e.g. 1%). This avoids over-filtering that would leave the
+portfolio builder with no buy candidates.
 """
 
 from __future__ import annotations
@@ -44,17 +43,30 @@ def estimate_transaction_cost(
     return params.broker_fee + spread_cost + slippage_cost
 
 
+def is_trade_net_expected_viable(
+    expected_return_frac: float,
+    transaction_cost_frac: float,
+    minimum_alpha_frac: float = 0.01,
+) -> bool:
+    """
+    Viable if net expected return (after costs) exceeds a small minimum.
+
+    net_expected_return = expected_return_frac - transaction_cost_frac
+    Reject only when net_expected_return <= minimum_alpha_frac (e.g. 1% = 0.01).
+    This prevents transaction costs from eliminating almost all candidates.
+    """
+    net = expected_return_frac - transaction_cost_frac
+    return net > minimum_alpha_frac
+
+
 def is_trade_economically_viable(
     expected_return: float,
     transaction_cost: float,
     min_multiple: float = 3.0,
 ) -> bool:
     """
-    Require expected_return >= min_multiple × transaction_cost (as fraction of notional).
-
-    Example: min_multiple=3 means we only recommend a trade if the expected
-    return is at least 3× the one-way transaction cost, so that after round-trip
-    costs the trade still has positive expected edge.
+    Legacy: require expected_return >= min_multiple × transaction_cost.
+    Prefer is_trade_net_expected_viable for portfolio build (net return vs minimum alpha).
     """
     if transaction_cost <= 0:
         return expected_return > 0

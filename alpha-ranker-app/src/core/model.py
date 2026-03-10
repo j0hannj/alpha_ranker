@@ -845,10 +845,15 @@ def explain_ranking_context(ticker, models_dict, medians, feat_cols, prices,
 # predicted SIMPLE return over the training horizon (H months). So predicted_return_pct=12
 # means 12% return over H months, NOT annualized. We never interpret a 1-year prediction
 # as a 2-year return; we compound explicitly: projected_price = current_price * (1+r)^(m/H).
-def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_info=None):
+# When all_horizon_results is provided, each display horizon uses that horizon's prediction
+# when available (no extrapolation); otherwise we compound from primary horizon with clamped return.
+def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_info=None, all_horizon_results=None):
     """Project future prices per holding from model predictions.
     Uses model's prediction horizon (H months) so a 1-year prediction is never used as 2-year.
     Formula: projected_price = current_price * (1 + r_H)^(m/H), with r_H = model return over H months.
+    Model-sourced returns are clamped to avoid unrealistic projections (e.g. -81% over 2Y).
+    When all_horizon_results is provided (dict horizon_months -> {"results": df}), each display
+    horizon m uses that horizon's predicted_return_pct when available (no extrapolation).
     """
     if horizons is None:
         horizons = [3, 6, 12, 24, 120]
@@ -857,6 +862,10 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
         H = int(model_info["prediction_horizon_months"])
     if H <= 0:
         H = 12
+    # Sanity clamp: avoid extreme model outputs (e.g. -81% over 2Y from a single prediction)
+    max_return_per_horizon = 0.50
+    if isinstance(model_info, dict) and model_info.get("max_projection_return_cap") is not None:
+        max_return_per_horizon = float(model_info["max_projection_return_cap"])
     etf_defaults = {"6AQQ.DE":0.11,"ANX.PA":0.11,"UST.PA":0.11,"NDXH":0.11,
                     "IWDA.AS":0.08,"SWDA.L":0.08,"VWCE.DE":0.08,"VWCE.L":0.08}
     etf_name_match = {"nasdaq":0.11, "msci world":0.08, "all-world":0.08, "ftse all":0.08}
@@ -874,6 +883,8 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
                 raw_pct = match.iloc[0].get("predicted_return_pct")
                 if raw_pct is not None and pd.notna(raw_pct):
                     r_H = float(raw_pct) / 100.0
+                    # Clamp to avoid unrealistic projections (prediction is for H months, not annual)
+                    r_H = max(-max_return_per_horizon, min(max_return_per_horizon, r_H))
                     from_model = True
         if r_H is None:
             r_H = etf_defaults.get(t)
@@ -896,32 +907,49 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
             "projection_trace": {
                 "model_horizon_months": H,
                 "model_return_pct": round(r_H * 100, 2),
-                "output_interpretation": f"Model predicted {H}-month simple return (not annualized). Applied once for {H}M; compounded for longer horizons.",
+                "output_interpretation": f"Model predicted {H}-month simple return (not annualized). Applied once for {H}M; compounded for longer horizons. Model return clamped to ±{max_return_per_horizon*100:.0f}% per horizon.",
                 "formula": "projected_price = current_price * (1 + r_H)^(display_months / H)",
                 "from_model": from_model,
                 "per_horizon": {},
             },
         }
-        base = 1.0 + float(r_H)
         for m in horizons:
             if m <= 0:
                 continue
-            if base <= 0:
-                factor = 0.0
-            else:
-                factor = base ** (m / H)
-                if isinstance(factor, complex):
-                    factor = 0.0
-            factor = float(factor)
-            projected_price = cp * factor
             label = "10Y" if m == 120 else f"{m}M"
+            r_m = None
+            used_horizon_match = False
+            if all_horizon_results and m in all_horizon_results:
+                res_m = all_horizon_results[m].get("results")
+                if res_m is not None and hasattr(res_m, "empty") and not res_m.empty:
+                    match_m = res_m[res_m["ticker"] == t]
+                    if not match_m.empty:
+                        raw_m = match_m.iloc[0].get("predicted_return_pct")
+                        if raw_m is not None and pd.notna(raw_m):
+                            r_m = float(raw_m) / 100.0
+                            r_m = max(-max_return_per_horizon, min(max_return_per_horizon, r_m))
+                            used_horizon_match = True
+            if r_m is not None and used_horizon_match:
+                factor = 1.0 + r_m
+                formula_str = f"1 + {r_m:.4f} = {factor:.4f} (per-horizon prediction)"
+            else:
+                base = 1.0 + float(r_H)
+                if base <= 0:
+                    factor = 0.0
+                else:
+                    factor = base ** (m / H)
+                    if isinstance(factor, complex):
+                        factor = 0.0
+                factor = float(factor)
+                formula_str = f"(1 + {r_H:.4f})^({m}/{H}) = {factor:.4f}"
+            projected_price = cp * factor
             proj["horizons"][label] = {
                 "price": round(projected_price, 2),
                 "value": round(projected_price * h.get("units", 0), 2),
                 "gain_pct": round((factor - 1) * 100, 1),
             }
             proj["projection_trace"]["per_horizon"][label] = {
-                "formula": f"(1 + {r_H:.4f})^({m}/{H}) = {factor:.4f}",
+                "formula": formula_str,
                 "factor": round(factor, 4),
                 "projected_price": round(projected_price, 2),
             }

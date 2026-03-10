@@ -1,16 +1,26 @@
 """
 Portfolio builder: orchestrates confidence filter and allocation engine.
 
-Pipeline:
-  1. Filter assets by confidence threshold (LOW / MEDIUM / HIGH).
-  2. Rank by alpha_score.
-  3. Allocate capital proportionally (equal / risk parity / alpha weight).
-  4. Convert allocation to integer number of shares using real asset price.
-  5. Ensure total cost never exceeds budget.
+Workflow (portfolio decision engine):
+  1. Evaluate current portfolio: for each holding, check alpha, confidence, consensus, rank.
+  2. Identify weak positions: negative alpha, low confidence (< -0.5), poor consensus (< 0.3),
+     or weak ranking position (e.g. bottom 40% of universe).
+  3. Propose SELL for weak holdings (except DONT_SELL); freed capital is added to budget.
+  4. Combine freed capital with user budget; apply sector/turnover constraints.
+  5. Filter candidates by confidence (LOW/MEDIUM/HIGH), rank by alpha, allocate.
+  6. Output BUY/SELL with reason per line for explainability (why trade suggested).
 
-Output includes investment horizon and exit strategy per recommendation:
-  ticker, current_price, units_to_buy, investment_amount, confidence, expected_return,
-  expected_holding_period, strategy_type, target_price, stop_loss, review_date, model_consensus_score.
+Pipeline:
+  - Filter assets by confidence threshold (LOW / MEDIUM / HIGH); fallback to LOW if empty.
+  - Rank by alpha_score; allocate (equal / risk parity / alpha weight).
+  - Integer shares; total cost <= budget; sector cap (max_sector_pct) and turnover cap (max_turnover_pct).
+
+Explainability: each recommendation includes "reason" (e.g. "Consider selling: negative alpha, weak ranking position",
+"Rank signal (fallback)", "Price needed - refresh data and re-run to get units") so the AI agent can explain
+why a stock moved in ranking, why the model predicted a return, and why the portfolio builder suggested a trade.
+
+Output: ticker, current_price, units_to_buy, investment_amount, confidence, expected_return,
+  expected_holding_period, strategy_type, target_price, stop_loss, review_date, model_consensus_score, action, reason.
 """
 
 from __future__ import annotations
@@ -25,7 +35,7 @@ from .allocation_engine import AllocationEngine
 from .transaction_cost_model import (
     TransactionCostParams,
     estimate_transaction_cost,
-    is_trade_economically_viable,
+    is_trade_net_expected_viable,
     expected_return_as_fraction,
 )
 
@@ -169,6 +179,7 @@ def build_suggested_portfolio(
     etf_positions: Optional[List[tuple]] = None,
     transaction_cost_params: Optional[TransactionCostParams] = None,
     min_return_vs_cost_multiple: float = 3.0,
+    minimum_expected_alpha: Optional[float] = None,
     holding_horizon_days: Optional[int] = None,
     default_stop_loss_pct: float = 10.0,
     existing_holdings: Optional[List[dict]] = None,
@@ -189,13 +200,17 @@ def build_suggested_portfolio(
         max_sector_pct = float(risk["max_sector_weight"])
     horizon = holding_horizon_days or ps.get("holding_horizon_days", 365)
     review_frequency_days = ps.get("review_frequency_days", 30)
+    # Net expected return threshold: reject only if (expected_return - tx_cost) <= this (e.g. 1% = 0.01)
+    min_alpha_frac = minimum_expected_alpha if minimum_expected_alpha is not None else float(ps.get("minimum_expected_alpha", 0.01))
 
     out: List[dict] = []
 
-    # Portfolio improvement: consider selling weak holdings to free capital
+    # Portfolio improvement: evaluate current positions → identify weak → consider selling → free capital
     freed_capital = 0.0
     holdings = existing_holdings or []
     model_df = model_results if model_results is not None and not model_results.empty else pd.DataFrame()
+    n_stocks = len(model_df) if not model_df.empty else 0
+    rank_col = "rank" if model_df is not None and not model_df.empty and "rank" in model_df.columns else "alpha_rank"
     for h in holdings:
         if (h.get("strategy_type") or "").upper() == "DONT_SELL":
             continue
@@ -206,15 +221,25 @@ def build_suggested_portfolio(
         alpha = None
         confidence = None
         consensus = None
+        rank_position = None
         if not row.empty:
             alpha = row.iloc[0].get("alpha_score")
             if pd.isna(alpha): alpha = (row.iloc[0].get("predicted_return_pct") or 0) / 100.0
             confidence = row.iloc[0].get("confidence")
+            rank_position = row.iloc[0].get(rank_col)
+            if pd.notna(rank_position): rank_position = int(rank_position)
             for c in ("reliability_score", "model_agreement_score"):
                 if c in row.columns and pd.notna(row.iloc[0].get(c)):
                     consensus = float(row.iloc[0][c])
                     break
-        weak = (alpha is not None and alpha < 0) or (confidence is not None and confidence < -0.5) or (consensus is not None and consensus < 0.3)
+        # Weak = negative alpha, low consensus, low confidence, or weak ranking position (bottom 40%)
+        weak_rank = n_stocks > 0 and rank_position is not None and rank_position > 0.6 * n_stocks
+        weak = (
+            (alpha is not None and alpha < 0)
+            or (confidence is not None and confidence < -0.5)
+            or (consensus is not None and consensus < 0.3)
+            or weak_rank
+        )
         if weak:
             units = h.get("units") or 0
             price = h.get("current_price") or h.get("avg_price") or 0
@@ -224,6 +249,7 @@ def build_suggested_portfolio(
             if alpha is not None and alpha < 0: reasons.append("negative alpha")
             if confidence is not None and confidence < -0.5: reasons.append("low confidence")
             if consensus is not None and consensus < 0.3: reasons.append("poor model consensus")
+            if weak_rank: reasons.append("weak ranking position")
             out.append({
                 "action": "SELL",
                 "src": "Model",
@@ -394,7 +420,6 @@ def build_suggested_portfolio(
             default_stop_pct: float,
             review_date: str,
             row: pd.DataFrame,
-            mult_used: float,
         ) -> None:
             target_price = round(price * (1 + expected_return_frac), 2) if expected_return_frac else None
             stop_loss = round(price * (1 - default_stop_pct), 2) if price else None
@@ -422,8 +447,6 @@ def build_suggested_portfolio(
             p["units_to_buy"] = units
             p["investment_amount"] = invested
             p["reason"] = f"Rank signal, confidence {p.get('confidence'):.2f}" if p.get("confidence") is not None else "Rank signal"
-            if mult_used < min_return_vs_cost_multiple:
-                p["reason"] = (p.get("reason", "") or "") + " (relaxed tx)"
             p["action"] = "BUY"
             out.append(p)
             nonlocal running_sector, running_total, turnover_so_far
@@ -431,46 +454,38 @@ def build_suggested_portfolio(
             running_total += invested
             turnover_so_far += invested
 
-        relaxed_multiple = 2.0  # fallback when 3x would yield zero candidates
-        for min_mult in (min_return_vs_cost_multiple, relaxed_multiple):
-            added_this_pass = 0
-            for p in positions:
-                row = model_results[model_results["ticker"] == p["ticker"]]
-                name = row.iloc[0]["name"] if not row.empty and "name" in row.columns else p["ticker"]
-                sector = row.iloc[0]["sector"] if not row.empty and "sector" in row.columns else ""
-                price = p["price"]
-                invested = p["invested_amount"]
-                units = p["units"]
-                alpha_val = p.get("alpha_score")
-                if alpha_val is None and not row.empty:
-                    pr = row.iloc[0].get("predicted_return_pct")
-                    alpha_val = float(pr) / 100.0 if pr is not None and pd.notna(pr) else None
-                expected_return_frac = expected_return_as_fraction(alpha_val * 100) if alpha_val is not None else 0.0
-                tx_cost = estimate_transaction_cost(price, units, notional=invested, params=tx_params)
-                tx_cost_frac = tx_cost / invested if invested and invested > 0 else 0
-                if not is_trade_economically_viable(expected_return_frac, tx_cost_frac, min_multiple=min_mult):
+        # Single pass: accept candidates with net expected return (expected_return - tx_cost) > minimum_alpha
+        for p in positions:
+            row = model_results[model_results["ticker"] == p["ticker"]]
+            name = row.iloc[0]["name"] if not row.empty and "name" in row.columns else p["ticker"]
+            sector = row.iloc[0]["sector"] if not row.empty and "sector" in row.columns else ""
+            price = p["price"]
+            invested = p["invested_amount"]
+            units = p["units"]
+            alpha_val = p.get("alpha_score")
+            if alpha_val is None and not row.empty:
+                pr = row.iloc[0].get("predicted_return_pct")
+                alpha_val = float(pr) / 100.0 if pr is not None and pd.notna(pr) else None
+            expected_return_frac = expected_return_as_fraction(alpha_val * 100) if alpha_val is not None else 0.0
+            tx_cost = estimate_transaction_cost(price, units, notional=invested, params=tx_params)
+            tx_cost_frac = tx_cost / invested if invested and invested > 0 else 0
+            if not is_trade_net_expected_viable(expected_return_frac, tx_cost_frac, minimum_alpha_frac=min_alpha_frac):
+                continue
+            if any(o.get("ticker") == p["ticker"] and o.get("src") == "Model" for o in out):
+                continue
+            new_sector_val = running_sector.get(sector, 0) + invested
+            new_total = running_total + invested
+            if new_total > 0 and new_sector_val / new_total > max_sector_pct:
+                continue
+            if total_val > 0 and max_turnover_pct < 1.0:
+                if (turnover_so_far + invested) / total_val > max_turnover_pct:
                     continue
-                # Skip if we already added this ticker in a previous pass
-                if any(o.get("ticker") == p["ticker"] and o.get("src") == "Model" for o in out):
-                    continue
-                # Diversification: skip if this position would push sector over max_sector_pct
-                new_sector_val = running_sector.get(sector, 0) + invested
-                new_total = running_total + invested
-                if new_total > 0 and new_sector_val / new_total > max_sector_pct:
-                    continue
-                # Turnover control: skip if adding this trade would exceed max_turnover_pct
-                if total_val > 0 and max_turnover_pct < 1.0:
-                    if (turnover_so_far + invested) / total_val > max_turnover_pct:
-                        continue
-                review_date = (datetime.now() + timedelta(days=review_frequency_days)).strftime("%Y-%m-%d")
-                stop_pct = default_stop_loss_pct / 100.0
-                _add_position(
-                    p, name, sector, price, invested, units, alpha_val,
-                    expected_return_frac, tx_cost, horizon, stop_pct, review_date, row, min_mult,
-                )
-                added_this_pass += 1
-            if added_this_pass > 0:
-                break
+            review_date = (datetime.now() + timedelta(days=review_frequency_days)).strftime("%Y-%m-%d")
+            stop_pct = default_stop_loss_pct / 100.0
+            _add_position(
+                p, name, sector, price, invested, units, alpha_val,
+                expected_return_frac, tx_cost, horizon, stop_pct, review_date, row,
+            )
 
         # If still no BUY candidates but we have budget and signals, propose top N by alpha (price TBD)
         n_buys = sum(1 for o in out if o.get("action") == "BUY" and o.get("src") == "Model")

@@ -552,7 +552,10 @@ class AlphaRanker(ctk.CTk):
                     msg = "Add holdings to your portfolio to see DCA projection."
                 ctk.CTkLabel(self.pf_proj, text=msg, font=("", 10), text_color="#71717a", wraplength=320).pack(padx=12, pady=24, fill="x")
                 return
-            projs = model.project_portfolio_prices(pnl, mr, model_info=getattr(self, "model_info", None))
+            projs = model.project_portfolio_prices(
+                pnl, mr, model_info=getattr(self, "model_info", None),
+                all_horizon_results=getattr(self, "all_horizon_results", None),
+            )
             if not projs:
                 ctk.CTkLabel(self.pf_proj, text="No price projections. Run the model for your holdings.", font=("", 10), text_color="#71717a", wraplength=320).pack(padx=12, pady=24, fill="x")
                 return
@@ -1300,7 +1303,10 @@ class AlphaRanker(ctk.CTk):
     def _upd_proj(self):
         if self.model_results is None or self._portfolio_pnl is None:
             self.prj_lbl.configure(text="Run model first."); return
-        projs=model.project_portfolio_prices(self._portfolio_pnl,self.model_results,model_info=self.model_info)
+        projs = model.project_portfolio_prices(
+            self._portfolio_pnl, self.model_results, model_info=self.model_info,
+            all_horizon_results=getattr(self, "all_horizon_results", None),
+        )
         self.prj_tree.delete(*self.prj_tree.get_children())
         imap=get_isin_map()
         tn=t12=0
@@ -1719,6 +1725,14 @@ class AlphaRanker(ctk.CTk):
                 self._sett[k]=e
                 ctk.CTkLabel(scroll,text=hint,font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
                 row+=1
+            # Minimum expected alpha: net return after costs must exceed this (stored as fraction; UI shows %)
+            ctk.CTkLabel(scroll,text="Minimum expected alpha (%)",font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
+            e_min_alpha=ctk.CTkEntry(scroll,width=120,font=("JetBrains Mono",10))
+            e_min_alpha.grid(row=row,column=1,sticky="w",pady=3)
+            e_min_alpha.insert(0, str(round(ps.get("minimum_expected_alpha", 0.01) * 100, 1)))
+            self._sett["minimum_expected_alpha_pct"]=e_min_alpha
+            ctk.CTkLabel(scroll,text="Min net return after costs (e.g. 1 = 1%)",font=("",9),text_color="#52525b").grid(row=row,column=2,sticky="w",padx=8)
+            row+=1
             # Sell signal configuration (per strategy)
             sell_modes = ["disabled", "passive", "active"]
             ctk.CTkLabel(scroll, text="Sell Signal Configuration", font=("", 15, "bold")).grid(row=row, column=0, columnspan=3, sticky="w", pady=(12, 8)); row += 1
@@ -1934,6 +1948,14 @@ class AlphaRanker(ctk.CTk):
                         if raw:
                             try: ps[k] = int(raw)
                             except ValueError: pass
+                e_min_alpha = self._sett.get("minimum_expected_alpha_pct")
+                if e_min_alpha is not None:
+                    try:
+                        pct = float(e_min_alpha.get())
+                        if 0 <= pct <= 100:
+                            ps["minimum_expected_alpha"] = pct / 100.0
+                    except ValueError:
+                        pass
                 for k in getattr(self, "_sell_mode_vars", {}):
                     v = self._sell_mode_vars[k].get()
                     if v in ("disabled", "passive", "active"):
