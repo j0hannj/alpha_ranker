@@ -47,38 +47,23 @@ def _get_data_config():
 UNIVERSE_CACHE = CACHE_DIR / "universe_cache.json"
 
 
-def _yf_screen(query_body: dict, size: int = 250, offset: int = 0):
+def _read_html_with_headers(url: str):
     """
-    Appel direct au screener Yahoo Finance (équivalent de yf.screen),
-    compatible avec toutes les versions de yfinance.
+    pd.read_html avec un vrai User-Agent pour éviter les 403 (Wikipedia, etc.).
     """
-    body = {
-        "size": int(size),
-        "offset": int(offset),
-        "sortField": "intradaymarketcap",
-        "sortType": "DESC",
-        "quoteType": "EQUITY",
-        "query": query_body,
-        "userId": "",
-        "userIdType": "guid",
+    import io
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
     }
-    url = "https://query2.finance.yahoo.com/v1/finance/screener"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        data = json.loads(r.read().decode())
-    res = (data.get("finance") or {}).get("result") or [{}]
-    out = res[0] if isinstance(res, list) and res else res
-    quotes = out.get("quotes") or []
-    total = out.get("total") or len(quotes)
-    return {"quotes": quotes, "total": total}
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=15) as r:
+        html = r.read().decode("utf-8", errors="replace")
+    return pd.read_html(io.StringIO(html))
 
 
 WIKIPEDIA_INDICES = [
@@ -99,7 +84,7 @@ def _discover_from_wikipedia(callback=None):
         try:
             if callback:
                 callback(f"Wikipedia: {idx['name']}...")
-            tables = pd.read_html(idx["url"])
+            tables = _read_html_with_headers(idx["url"])
             ticker_col = None
             target_table = None
             for t in tables:
@@ -198,8 +183,57 @@ def _discover_from_yf_search(callback=None):
     return discovered
 
 
+def _enrich_with_yfinance(tickers_to_enrich, callback=None):
+    """
+    Enrichir sector + marketCap via yfinance.
+
+    IMPORTANT: Ne pas appeler ça sur des milliers de tickers en une fois,
+    sinon on se fait rate-limiter. Limiter en amont dans scan_and_expand_universe.
+    """
+    import yfinance as yf
+    import time as _time
+
+    enriched: dict[str, dict] = {}
+    batch_size = 50
+
+    for i in range(0, len(tickers_to_enrich), batch_size):
+        batch = tickers_to_enrich[i : i + batch_size]
+        if callback and i % 100 == 0:
+            callback(f"  Enriching {i}/{len(tickers_to_enrich)} via yfinance...")
+        for sym in batch:
+            try:
+                info = yf.Ticker(sym).info
+                if info and info.get("marketCap"):
+                    enriched[sym] = {
+                        "shortName": info.get("shortName"),
+                        "sector": info.get("sector"),
+                        "industry": info.get("industry"),
+                        "marketCap": info.get("marketCap"),
+                        "currentPrice": info.get("currentPrice")
+                        or info.get("regularMarketPrice"),
+                        "country": info.get("country"),
+                        "exchange": info.get("exchange"),
+                    }
+            except Exception as e:
+                logger.debug("yfinance info for %s failed: %s", sym, e)
+        # petites pauses entre batchs pour éviter le rate limit Yahoo
+        if i + batch_size < len(tickers_to_enrich):
+            try:
+                _time.sleep(1)
+            except Exception:
+                pass
+
+    if callback:
+        callback(f"  Enriched via yfinance: {len(enriched)}/{len(tickers_to_enrich)}")
+    return enriched
+
+
 def _discover_from_fmp_search(callback=None):
-    """Découverte via FMP /api/v3/search (gratuit)."""
+    """Découverte via FMP /api/v3/search (gratuit) – actuellement souvent 403.
+
+    NOTE: n'est plus appelée par scan_and_expand_universe. Laissons-la en
+    place pour des usages futurs éventuels, avec fail-fast sur 403.
+    """
     api_key = os.environ.get("FMP_API_KEY")
     if not api_key:
         return {}
@@ -218,7 +252,10 @@ def _discover_from_fmp_search(callback=None):
         "mining",
         "luxury",
     ]
+    fmp_is_dead = False
     for term in searches:
+        if fmp_is_dead:
+            break
         for exchange in ["NASDAQ", "NYSE", "EURONEXT", "XETRA", "LSE"]:
             try:
                 url = (
@@ -236,6 +273,16 @@ def _discover_from_fmp_search(callback=None):
                             "exchange": item.get("exchangeShortName"),
                             "source": "fmp_search",
                         }
+            except urllib.error.HTTPError as e:
+                if e.code == 403:
+                    logger.warning("FMP search returned 403 — stopping all FMP search calls")
+                    if callback:
+                        callback("FMP API not available (403). Skipping FMP search.")
+                    fmp_is_dead = True
+                    break
+                logger.warning("FMP search '%s' on %s failed: %s", term, exchange, e)
+                if callback:
+                    callback(f"  FMP search '{term}' {exchange} error: {e}")
             except Exception as e:
                 logger.warning("FMP search '%s' on %s failed: %s", term, exchange, e)
                 if callback:
@@ -334,38 +381,39 @@ def scan_and_expand_universe(callback=None):
     if callback:
         callback(f"After yf.Search: {len(discovered)} tickers")
 
-    # 3) FMP search
-    fmp = _discover_from_fmp_search(callback)
-    for k, v in fmp.items():
-        if k not in discovered:
-            discovered[k] = v
+    # 3) (FMP search désactivé par défaut, API retourne 403)
+    #    On n'appelle plus _discover_from_fmp_search() ici.
     if callback:
         callback(f"Total discovered (raw): {len(discovered)} unique tickers")
     logger.info("scan_and_expand_universe: total discovered (raw)=%d", len(discovered))
 
-    # 4) Merge avec univers connu, enrichir via FMP profile si dispo
-    api_key = os.environ.get("FMP_API_KEY")
+    # 4) Merge avec univers connu, enrichir ensuite via yfinance (FMP profile → 403)
     known = portfolio.get_universe() or {}
     known_set = set(known.keys())
     new_tickers = set(discovered.keys()) - known_set
     if callback:
         callback(f"Known: {len(known_set)} | New discoveries: {len(new_tickers)}")
 
-    profiles = {}
-    if api_key and new_tickers:
-        to_enrich = list(new_tickers)
-        max_enrich = int(uv.get("max_profile_enrichment", 2000))
-        to_enrich = to_enrich[:max_enrich]
+    # Enrichir uniquement les tickers nouveaux ou incomplets via yfinance (limités)
+    need_enrich = [
+        t
+        for t in new_tickers
+        if not known.get(t, {}).get("marketCap")
+    ]
+    max_enrich = int(uv.get("max_profile_enrichment", 200))
+    if need_enrich:
         if callback:
-            callback(f"Enriching {len(to_enrich)} stocks via FMP profile...")
-        profiles = _enrich_with_profiles(to_enrich, api_key, callback)
+            callback(f"Enriching {min(len(need_enrich), max_enrich)} stocks via yfinance...")
+        profiles = _enrich_with_yfinance(need_enrich[:max_enrich], callback)
+    else:
+        profiles = {}
 
     now_iso = datetime.now().isoformat()
     today = datetime.now().strftime("%Y-%m-%d")
     full_universe: dict[str, dict] = dict(known)
     for sym, base_info in discovered.items():
         base = full_universe.get(sym, {})
-        prof = profiles.get(sym) if profiles else {}
+        prof = profiles.get(sym) or {}
         full_universe[sym] = {
             "shortName": prof.get("shortName") or base_info.get("shortName") or base.get("shortName") or sym,
             "sector": prof.get("sector") or base_info.get("sector") or base.get("sector"),
