@@ -1,7 +1,9 @@
 """Auto-install Ollama + choice of model."""
+import logging
 import subprocess, os, sys, json, time, urllib.request, shutil
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 OLLAMA_URL = "https://ollama.com/download/OllamaSetup.exe"
 DOWNLOAD_DIR = Path(__file__).parent.parent.parent / "db"
 
@@ -25,7 +27,9 @@ def is_ollama_running():
     try:
         with urllib.request.urlopen(urllib.request.Request("http://localhost:11434/api/tags"), timeout=2) as r:
             return r.status == 200
-    except: return False
+    except Exception as e:
+        logger.debug("is_ollama_running: %s", e)
+        return False
 
 def get_installed_models():
     try:
@@ -88,7 +92,8 @@ def start_ollama(callback=None):
         for _ in range(15):
             time.sleep(1)
             if is_ollama_running(): return True
-    except: pass
+    except Exception as e:
+        logger.warning("start_ollama: %s", e)
     return False
 
 def pull_model(model_key=DEFAULT_MODEL, callback=None):

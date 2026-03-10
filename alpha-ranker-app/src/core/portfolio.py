@@ -4,11 +4,13 @@ Tracks positions with strategy type (LONG_TERM / MEDIUM_TERM / SHORT_TERM),
 entry/current prices, model metrics (confidence, alpha_score, expected_return),
 target_price, stop_loss, holding_horizon_days, transaction_cost, and status (OPEN/SOLD).
 """
+import logging
 import sqlite3
 import json
 from pathlib import Path
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent.parent.parent / "db" / "portfolio.db"
 
 
@@ -206,7 +208,8 @@ def compute_pnl(holdings_list, fx_rate=1.08, gbp_rate=1.16, base="EUR"):
                 secs = json.loads(h["sectors_json"])
                 for s, w in secs.items():
                     sectors[s] = sectors.get(s, 0) + val * w
-            except: pass
+            except Exception as e:
+                logger.warning("portfolio_with_pnl: sectors_json parse for holding %s failed: %s", h.get("ticker"), e)
         elif h.get("sector"):
             sectors[h["sector"]] = sectors.get(h["sector"], 0) + val
         results.append({**h, "value": round(val, 2), "cost": round(cost, 2),

@@ -11,18 +11,21 @@ Sources:
   - exchangerate.host → FX rates
 """
 import calendar
+import logging
 import os, json, urllib.request
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 # Load .env before any API calls
 try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).parent.parent.parent / ".env")
 except ImportError:
-    pass  # dotenv not installed, rely on env vars
+    logger.debug("dotenv not installed, relying on env vars")
 
 CACHE_DIR = Path(__file__).parent.parent.parent / "db"
 CACHE_DIR.mkdir(exist_ok=True)
@@ -461,9 +464,10 @@ def fetch_ratios(ticker, api_key=None):
                     "roe","returnOnTangibleAssets","debtToEquity","currentRatio",
                     "freeCashFlowPerShare","marketCap","dividendYield","payoutRatio",
                     "revenuePerShare","bookValuePerShare","grossProfitMargin",
-                    "operatingProfitMargin","netProfitMargin","priceEarningsToGrowthRatio",
+                    "operatingProfitMargin","netProfitMargin",                    "priceEarningsToGrowthRatio",
                     "quickRatio"] if k in item}})
-        except: pass
+        except Exception as e:
+            logger.warning("fetch_fmp_quarterly: request failed for %s: %s", ticker, e)
     return results
 
 # ── MACRO (FRED) ──────────────────────────────────────────────
@@ -475,8 +479,8 @@ def fetch_macro(callback=None):
         if cached is not None:
             if callback: callback("Macro: cache hit")
             return cached
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("fetch_macro: api_cache get failed: %s", e)
     if callback: callback("Macro: fetching FRED...")
     fallback = {"date":datetime.now().strftime("%Y-%m-%d"),
                 "fed_funds_rate":4.5,"us_10y_yield":4.1,"yield_curve_slope":-0.4,
@@ -493,15 +497,18 @@ def fetch_macro(callback=None):
             try:
                 s = fred.get_series(sid, start, end)
                 if len(s) > 0: macro[name] = round(float(s.dropna().iloc[-1]),2)
-            except: pass
+            except Exception as e:
+                logger.debug("fetch_macro: FRED series %s failed: %s", sid, e)
         if "us_10y_yield" in macro and "us_2y_yield" in macro:
             macro["yield_curve_slope"] = round(macro["us_10y_yield"]-macro["us_2y_yield"],2)
         try:
             set("fred", "macro", macro)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("fetch_macro: api_cache set failed: %s", e)
         return macro
-    except: return fallback
+    except Exception as e:
+        logger.warning("fetch_macro: FRED fetch failed, using fallback: %s", e)
+        return fallback
 
 # ── FX (exchangerate.host + yfinance fallback) ────────────────
 def fetch_fx(base="EUR", targets=None, callback=None):
@@ -514,8 +521,8 @@ def fetch_fx(base="EUR", targets=None, callback=None):
         if cached is not None:
             if callback: callback("FX: cache hit")
             return cached
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("fetch_fx: api_cache get failed: %s", e)
     if callback: callback("FX: fetching rates...")
     rates = {"date": datetime.now().strftime("%Y-%m-%d"), "base": base}
     try:
@@ -526,7 +533,8 @@ def fetch_fx(base="EUR", targets=None, callback=None):
             for t in targets:
                 if t in data.get("rates",{}):
                     rates[f"{base}_{t}"] = round(data["rates"][t],4)
-    except: pass
+    except Exception as e:
+        logger.warning("fetch_fx: exchangerate.host request failed: %s", e)
     if not any(f"{base}_{t}" in rates for t in targets):
         try:
             import yfinance as yf
@@ -534,13 +542,14 @@ def fetch_fx(base="EUR", targets=None, callback=None):
                 pair = f"{base}{t}=X"
                 p = yf.Ticker(pair).info.get("regularMarketPrice")
                 if p: rates[f"{base}_{t}"] = round(float(p),4)
-        except: pass
+        except Exception as e:
+            logger.warning("fetch_fx: yfinance fallback failed: %s", e)
     if f"{base}_USD" not in rates: rates[f"{base}_USD"] = 1.08
     if f"{base}_GBP" not in rates: rates[f"{base}_GBP"] = 0.86
     try:
         set("fx", cache_key, rates)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("fetch_fx: api_cache set failed: %s", e)
     return rates
 
 # ── COMBINED FETCH ────────────────────────────────────────────
@@ -550,8 +559,8 @@ def fetch_all_data(tickers=None, years=5, callback=None):
     try:
         from .api_cache import clear_older_than_days
         clear_older_than_days(30)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("fetch_all_data: clear_older_than_days failed: %s", e)
     if callback: callback("Data: universe...")
     universe_tickers, prices, fundamentals = fetch_universe(years, callback=callback)
     if tickers: universe_tickers = list(set(universe_tickers + tickers))
@@ -567,7 +576,8 @@ def fetch_all_data(tickers=None, years=5, callback=None):
     try:
         from .news import batch_sentiment
         sentiment = batch_sentiment(list(fundamentals.keys())[:150], callback)
-    except: pass
+    except Exception as e:
+        logger.warning("fetch_all_data: batch_sentiment failed: %s", e)
 
     if callback:
         n_t, n_f = len(universe_tickers), len(fundamentals)

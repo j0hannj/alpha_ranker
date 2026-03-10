@@ -6,16 +6,20 @@ Alpha Ranker AI Agent v3
 - Understands the app architecture
 - Works with Claude API or local Ollama
 """
-import json, os, re
+import json
+import logging
+import os, re
 from pathlib import Path
 from .news import build_news_context, search_general, get_sentiment_score
 
+logger = logging.getLogger(__name__)
 HISTORY_PATH = Path(__file__).parent.parent.parent / "db" / "agent_history.json"
 
 def _load_history():
     if HISTORY_PATH.exists():
         try: return json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
-        except: pass
+        except Exception as e:
+            logger.warning("agent _load_history: %s", e)
     return []
 
 def _save_history(h):
@@ -217,7 +221,8 @@ def build_context(portfolio_pnl=None, model_results=None, macro=None,
             if val:
                 suffix = f" {unit}" if unit else ""
                 ctx += f"  {label}: {val}{suffix}\n"
-    except: pass
+    except Exception as e:
+        logger.warning("build_context: portfolio settings failed: %s", e)
 
     # Tab-specific context
     if active_tab == "Portfolio":
@@ -333,10 +338,12 @@ def _enrich_with_news(user_message, portfolio_pnl=None):
     for t in tickers[:3]:
         if t in seen: continue; seen.add(t)
         try: extra += build_news_context(t)
-        except: pass
+        except Exception as e:
+            logger.debug("_enrich_with_news: build_news_context %s: %s", t, e)
     if _detect_search(user_message):
         try: extra += search_general(user_message[:80]+" stock market 2026")
-        except: pass
+        except Exception as e:
+            logger.debug("_enrich_with_news: search_general: %s", e)
     return extra
 
 # ═══════════════════════════════════════════════════════════════
@@ -370,7 +377,9 @@ def _check_ollama():
             for p in ["mistral-small","qwen2.5:14b","llama3.1","phi4","gemma3:12b","mistral","llama3"]:
                 if p in models: return p
             return models[0] if models else None
-    except: return None
+    except Exception as e:
+        logger.debug("_check_ollama: %s", e)
+        return None
 
 # ═══════════════════════════════════════════════════════════════
 # MAIN CHAT
@@ -410,7 +419,8 @@ def chat(user_message, portfolio_pnl=None, model_results=None, macro=None,
                     model_state["fundamentals_db"], macro or {},
                     model_state["sector_map"], model_state.get("yf_info"))
                 explain_ctx += exp
-            except: pass
+            except Exception as e:
+                logger.warning("chat: explain_ranking_context for %s: %s", t, e)
 
     full_extra = news_ctx + explain_ctx + (extra_context or "")
     system = build_context(portfolio_pnl, model_results, macro, feat_imp,

@@ -7,8 +7,12 @@ this module uses the AI agent + web search to diagnose and fix the issue.
 Architecture:
   error detected → build error context → search web → LLM analyzes → fix applied
 """
-import json, re
+import json
+import logging
+import re
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 def resolve_ticker_error(ticker, error_msg, callback=None, isin=None):
     """When a ticker fails to fetch, try to fix it.
@@ -32,7 +36,8 @@ def resolve_ticker_error(ticker, error_msg, callback=None, isin=None):
                             "name": info.get("shortName",result["ticker"]),
                             "explanation": f"Resolved via ISIN {isin}",
                             "resolved_at": datetime.now().isoformat()}
-        except: pass
+        except Exception as e:
+            logger.warning("resolve_ticker_error: ISIN resolution for %s failed: %s", isin, e)
 
     from .news import web_search
 
@@ -46,7 +51,8 @@ def resolve_ticker_error(ticker, error_msg, callback=None, isin=None):
         try:
             r = web_search(q, max_results=3)
             results.extend(r)
-        except: pass
+        except Exception as e:
+            logger.warning("resolve_ticker_error: web_search %s failed: %s", q[:40], e)
 
     if not results:
         if callback: callback(f"  No web results for {ticker}")
@@ -231,7 +237,8 @@ def _extract_price_from_text(text):
         if m:
             try:
                 return float(m.group(1).replace(",", "."))
-            except: pass
+            except (ValueError, TypeError) as e:
+                logger.debug("_extract_price_from_text: %s", e)
     return None
 
 
@@ -254,5 +261,6 @@ def _extract_number_from_text(text, field):
             try:
                 clean = n.replace(",", ".").replace("%", "").replace("B", "e9").replace("M", "e6").replace("K", "e3")
                 return float(clean)
-            except: pass
+            except (ValueError, TypeError) as e:
+                logger.debug("_extract_number_from_text: %s", e)
     return None

@@ -10,6 +10,7 @@ Ensemble: LightGBM + XGBoost + Ridge + RandomForest
 Combination: OOS-IC-weighted average
 Output: alpha_score, alpha_rank per ticker
 """
+import logging
 import os, json, pickle, random, warnings
 import numpy as np
 import pandas as pd
@@ -46,6 +47,7 @@ from features.cross_sectional import (
     decorrelate_features,
 )
 
+logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore")
 CACHE_DIR = Path(__file__).parent.parent.parent / "db"
 CACHE_DIR.mkdir(exist_ok=True)
@@ -373,7 +375,8 @@ def predict_ensemble(models_dict, X, method="ic_weighted", return_per_model=Fals
             p = info["model"].predict(X)
             all_preds[name] = np.asarray(p)
             weights[name] = max(info.get("ic",info.get("cv_r2",0.01)), 0.001)
-        except: pass
+        except Exception as e:
+            logger.warning("predict_ensemble: model %s predict failed: %s", name, e)
     if not all_preds: return np.zeros(len(X)), {}
     if method == "simple_average":
         final = np.mean(np.array(list(all_preds.values())), axis=0)
@@ -569,7 +572,8 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
                 "ic":np.mean(per_model_oos.get(name,[])) or 0.01,
                 "cv_r2":np.mean(per_model_oos.get(name,[])) or 0}
             if callback: callback(f"  {name}: trained, OOS IC={final_models[name]['ic']:.4f}")
-        except: pass
+        except Exception as e:
+            logger.warning("walk_forward final fit: %s failed: %s", name, e)
     feat_imp = _get_feature_importance(final_models,feat_cols)
     return final_models, med_final, feat_cols, feat_imp, oos_metrics
 
@@ -727,7 +731,8 @@ def explain_prediction(ticker, models_dict, medians, feat_cols, prices,
                     raw = m.predict(X_ranked, pred_contrib=True)
                     if raw.ndim == 2:
                         contribs = raw[0, :-1]  # Last element is bias
-                except: pass
+                except Exception as e:
+                    logger.debug("explain_prediction: LightGBM contrib for %s: %s", name, e)
 
             # XGBoost native SHAP
             elif "XGB" in type(m).__name__:
@@ -737,13 +742,15 @@ def explain_prediction(ticker, models_dict, medians, feat_cols, prices,
                     raw = m.get_booster().predict(dmat, pred_contribs=True)
                     if raw.ndim == 2:
                         contribs = raw[0, :-1]
-                except: pass
+                except Exception as e:
+                    logger.debug("explain_prediction: XGBoost contrib for %s: %s", name, e)
 
             # Ridge: contribution = coefficient × feature value
             elif hasattr(m, "coef_"):
                 try:
                     contribs = m.coef_ * X_ranked.iloc[0].values
-                except: pass
+                except Exception as e:
+                    logger.debug("explain_prediction: Ridge contrib for %s: %s", name, e)
 
             # RandomForest: use feature_importances × signed deviation as proxy
             elif hasattr(m, "feature_importances_"):
@@ -752,7 +759,8 @@ def explain_prediction(ticker, models_dict, medians, feat_cols, prices,
                     imp = m.feature_importances_
                     vals = X_ranked.iloc[0].values
                     contribs = imp * (vals - 0.5) * 2  # Scale to meaningful range
-                except: pass
+                except Exception as e:
+                    logger.debug("explain_prediction: RandomForest contrib for %s: %s", name, e)
 
             if contribs is not None and len(contribs) == len(feat_cols):
                 contrib_dict = {feat_cols[i]: round(float(contribs[i] * 100), 3)
@@ -997,7 +1005,8 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
                 s=sentiment_scores.get(ticker,0.0)
                 row["sentiment_x_momentum"]=s*row.get("momentum_12_1",0)
             records.append(row)
-        except: pass
+        except Exception as e:
+            logger.warning("train_simple: row build for %s failed: %s", ticker, e)
     df = pd.DataFrame(records)
     if len(df)<30: return None,None,None,None,None,None
     meta=["ticker","name","sector","target_12m"]
@@ -1017,7 +1026,8 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
             cv=cross_val_score(m,X,y,cv=5,scoring="r2"); m.fit(X,y)
             ensemble[name]={"model":m,"cv_r2":round(cv.mean(),4),"ic":round(cv.mean(),4)}
             if callback: callback(f"  {name}: CV R2={cv.mean():.3f}")
-        except: pass
+        except Exception as e:
+            logger.warning("train_simple: ensemble fit %s failed: %s", name, e)
     feat_imp = _get_feature_importance(ensemble,fcols)
     preds,blend = predict_ensemble(ensemble,X)
     df["alpha_score_raw"] = preds
@@ -1311,7 +1321,8 @@ def load_cached():
     if MODEL_CACHE.exists():
         try:
             with open(MODEL_CACHE,"rb") as f: return pickle.load(f)
-        except: pass
+        except Exception as e:
+            logger.warning("load_cached: pickle load failed: %s", e)
     return None
 
 
@@ -1320,5 +1331,5 @@ def clear_model_cache():
     if MODEL_CACHE.exists():
         try:
             MODEL_CACHE.unlink()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("clear_model_cache: unlink failed: %s", e)

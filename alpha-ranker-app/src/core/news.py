@@ -1,8 +1,12 @@
 """News & web search module — 100% gratuit, zero API key.
 Sources: yfinance news + DuckDuckGo search."""
 
-import json, re
+import json
+import logging
+import re
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
 # 1. YFINANCE NEWS
@@ -27,7 +31,8 @@ def get_ticker_news(ticker, max_results=5):
                 "source": "yfinance",
             })
         return results
-    except:
+    except Exception as e:
+        logger.warning("get_ticker_news %s: %s", ticker, e)
         return []
 
 
@@ -126,7 +131,8 @@ def batch_sentiment(tickers, callback=None):
         try:
             result = get_sentiment_score(t)
             scores[t] = result["score"]
-        except:
+        except Exception as e:
+            logger.warning("batch_sentiment %s: %s", t, e)
             scores[t] = 0.0
     if callback:
         pos = sum(1 for s in scores.values() if s > 0)

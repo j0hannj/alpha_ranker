@@ -2,6 +2,7 @@
 Tabs: Portfolio | Rankings | Build | Projections | Backtest | Universe | Settings
 Shared AI chat panel on the right side.
 """
+import logging
 import sys, os, threading, json
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -13,9 +14,11 @@ from core.ranking_insights import add_ranking_insights
 from core.api_cache import get_isin_map, get_display_id, get_stored_universe_list, set_stored_universe_list, set_isin_map
 from core.ollama_setup import (is_ollama_installed, is_ollama_running,
                                 full_setup as ollama_full_setup, MODELS as OLLAMA_MODELS)
+logger = logging.getLogger(__name__)
 try:
     from core import engine_config as _engine_cfg
-except Exception:
+except Exception as e:
+    logger.warning("engine_config import failed: %s", e)
     _engine_cfg = None
 ctk.set_appearance_mode("dark"); ctk.set_default_color_theme("blue")
 
@@ -30,7 +33,8 @@ class AlphaRanker(ctk.CTk):
         try:
             icon_path = Path(__file__).parent.parent / "icon.ico"
             if icon_path.exists(): self.iconbitmap(str(icon_path))
-        except: pass
+        except Exception as e:
+            logger.debug("iconbitmap failed: %s", e)
         # State
         self.model_results=None; self.feat_imp=None; self.model_info=None
         self.macro=None; self.model_state=None
@@ -167,7 +171,8 @@ class AlphaRanker(ctk.CTk):
 
     def _clog(self,msg):
         try: self.clog.insert("end",f"[!] {msg}\n"); self.clog.see("end")
-        except: pass
+        except Exception as e:
+            logger.debug("_clog insert failed: %s", e)
 
     def _morning_briefing(self):
         """Auto-fetch market news and portfolio summary on startup."""
@@ -255,7 +260,7 @@ class AlphaRanker(ctk.CTk):
                       command=self._accept_sell_from_selection).pack(side="left",padx=(0,6))
         ctk.CTkButton(self.pf_sell_btns,text="History",width=70,height=26,font=("",10),fg_color="#27272a",
                       command=self._show_trade_history).pack(side="left")
-        self.pf_sell_placeholder=ctk.CTkLabel(self.pf_sell_frame,text="Run the alpha model first (Rankings \u2192 Run Model) to evaluate sell signals.",font=("",10),text_color="#71717a",wraplength=300)
+        self.pf_sell_placeholder=ctk.CTkLabel(self.pf_sell_frame,text="Sell alerts require model predictions. Run the alpha model first (Rankings \u2192 Run Model) to evaluate your holdings.",font=("",10),text_color="#71717a",wraplength=320)
         self._sell_signals=[]
         ctk.CTkLabel(rp,text="DCA Projection",font=("",11,"bold")).pack(padx=10,pady=(8,2))
         self.pf_proj=ctk.CTkFrame(rp,fg_color="#09090b",corner_radius=8)
@@ -452,7 +457,8 @@ class AlphaRanker(ctk.CTk):
                     agr_str,
                     reason,
                 ),tags=(tag,))
-        except Exception: pass
+        except Exception as e:
+            logger.warning("_update_sell_alerts: insert row failed: %s", e)
 
     def _accept_sell_from_selection(self):
         sel=self.pf_sell_tree.selection()
@@ -649,7 +655,8 @@ class AlphaRanker(ctk.CTk):
             for s in ["bottom","left"]: ax.spines[s].set_color("#27272a")
             fig.tight_layout(pad=0.3)
             cv=FigureCanvasTkAgg(fig,master=self.pf_chart); cv.draw(); cv.get_tk_widget().pack(fill="both",expand=True)
-        except: pass
+        except Exception as e:
+            logger.warning("portfolio value chart draw failed: %s", e)
 
     # ── RANKINGS TAB ──────────────────────────────────────────
     def _init_rankings(self):
@@ -795,7 +802,8 @@ class AlphaRanker(ctk.CTk):
             last_run=portfolio.get_current_run_timestamp()
             if last_run and hasattr(self,"rk_data_updated"):
                 self.rk_data_updated.configure(text=f"Last model run: {last_run}",text_color="#34d399")
-        except Exception: pass
+        except Exception as e:
+            logger.debug("_upd_rankings get_current_run_timestamp: %s", e)
         if hasattr(self,"rk_health_lbl") and self.model_info:
             verdict,color,msg=model.assess_model_health(self.model_info)
             ic=self.model_info.get("mean_ic"); hr=self.model_info.get("hit_rate"); icir=self.model_info.get("ic_ir")
@@ -884,7 +892,8 @@ class AlphaRanker(ctk.CTk):
             self._rk_tooltip_win.wm_geometry(f"+{self.winfo_pointerx()+12}+{self.winfo_pointery()+12}")
             lbl=ctk.CTkLabel(self._rk_tooltip_win,text=text,font=("",10),wraplength=320,fg_color="#27272a",corner_radius=6,padx=10,pady=8)
             lbl.pack(); self._rk_tooltip_win.lift()
-        except Exception: pass
+        except Exception as e:
+            logger.debug("_rk_show_tooltip: %s", e)
 
     def _rk_on_motion(self, event):
         reg=self.rk_tree.identify_region(event.x,event.y)
@@ -895,7 +904,9 @@ class AlphaRanker(ctk.CTk):
         item=self.rk_tree.identify_row(event.y); col=self.rk_tree.identify_column(event.x)
         if not item or not col or col=="#0": return
         try: col_idx=int(col[1:],10)-1
-        except: return
+        except (ValueError, TypeError) as e:
+            logger.debug("_rk_on_motion col parse: %s", e)
+            return
         if self._rk_tooltip_id: self.after_cancel(self._rk_tooltip_id)
         def _show(): self._rk_show_tooltip(item,col_idx); self._rk_tooltip_id=None
         self._rk_tooltip_id=self.after(600,_show)
@@ -1077,7 +1088,8 @@ class AlphaRanker(ctk.CTk):
                 if tickers:
                     prices=data.fetch_prices(tickers)
                     raw["current_price"]=raw["ticker"].map(lambda t: prices.get(t,{}).get("price"))
-            except Exception: pass
+            except Exception as e:
+                logger.warning("Build: fetch_prices for current_price failed: %s", e)
         positions=build_suggested_portfolio(
             model_results=raw,
             budget=budget,
@@ -1189,7 +1201,8 @@ class AlphaRanker(ctk.CTk):
                     self.clog.insert("end",f"\n[Build AI]\n{commentary}\n")
                     self.clog.see("end")
                 return
-            except: pass
+            except Exception as e:
+                logger.warning("Build AI parse proposals from response: %s", e)
         # Fallback: show response in chat, keep quant proposal
         self.clog.insert("end",f"\n[Build AI]\n{text[:500]}\n")
         self.clog.see("end")
@@ -1367,7 +1380,8 @@ class AlphaRanker(ctk.CTk):
                         if hasattr(prices,"columns") and isinstance(prices.columns,pd.MultiIndex):
                             keep=[c for c in prices.columns if isinstance(c,tuple) and len(c)==2 and c[0] in tickers_ok]
                             if keep: prices=prices[keep].copy()
-                except Exception: pass
+                except Exception as e:
+                    logger.warning("_run_model: ISIN filter / prices trim failed: %s", e)
                 sm={t:f.get("sector","") for t,f in yf.items()}
                 fk=os.environ.get("FMP_API_KEY")
                 if fk:
@@ -1440,7 +1454,8 @@ class AlphaRanker(ctk.CTk):
                 for s in ["bottom","left"]: ax2.spines[s].set_color("#27272a")
             fig.tight_layout(pad=0.8)
             cv=FigureCanvasTkAgg(fig,master=self.bt_chart); cv.draw(); cv.get_tk_widget().pack(fill="both",expand=True)
-        except: pass
+        except Exception as e:
+            logger.warning("Backtest chart draw failed: %s", e)
 
     # ── UNIVERSE TAB (tickers connus + historique au clic) ──────
     def _init_universe(self):
@@ -1933,7 +1948,8 @@ class AlphaRanker(ctk.CTk):
                 for k, w in getattr(self, "_risk_widgets", {}).items():
                     if hasattr(w, "get"):
                         try: risk[k] = float(w.get())
-                        except ValueError: pass
+                        except ValueError as e:
+                            logger.debug("Settings risk widget %s: %s", k, e)
                 _engine_cfg.set_system_config(_engine_cfg.DOMAIN_RISK, risk)
             except Exception as ex:
                 messagebox.showwarning("Engine config", f"Engine settings may not have saved: {ex}")
@@ -1947,23 +1963,24 @@ class AlphaRanker(ctk.CTk):
                         raw = e.get()
                         if raw:
                             try: ps[k] = int(raw)
-                            except ValueError: pass
+                            except ValueError as e:
+                                logger.debug("Settings portfolio %s int: %s", k, e)
                 e_min_alpha = self._sett.get("minimum_expected_alpha_pct")
                 if e_min_alpha is not None:
                     try:
                         pct = float(e_min_alpha.get())
                         if 0 <= pct <= 100:
                             ps["minimum_expected_alpha"] = pct / 100.0
-                    except ValueError:
-                        pass
+                    except ValueError as e:
+                        logger.debug("Settings minimum_expected_alpha: %s", e)
                 for k in getattr(self, "_sell_mode_vars", {}):
                     v = self._sell_mode_vars[k].get()
                     if v in ("disabled", "passive", "active"):
                         ps[k] = v
                 ps["sell_mode_dont_sell"] = "disabled"
                 _engine_cfg.set_system_config(_engine_cfg.DOMAIN_PORTFOLIO, ps)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Settings save portfolio/sell_mode: %s", e)
         self._update_engine()
         messagebox.showinfo("OK","Settings saved. Use \"Apply\" to invalidate cache and apply to next run.")
 
