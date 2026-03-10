@@ -977,6 +977,7 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         pass
     if callback: callback("Simple ensemble: technical + sentiment...")
     records = []
+    logger.info("train_simple: start (tickers=%d)", len(yf_fundamentals))
     for ticker,fund in yf_fundamentals.items():
         row = {"ticker":ticker,"name":fund.get("shortName",ticker),"sector":fund.get("sector","Unknown")}
         try:
@@ -1008,23 +1009,41 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         except Exception as e:
             logger.warning("train_simple: row build for %s failed: %s", ticker, e)
     df = pd.DataFrame(records)
-    if len(df)<30: return None,None,None,None,None,None
+    logger.info("train_simple: built dataframe with %d rows and %d columns", len(df), len(df.columns))
+    if len(df)<30:
+        logger.warning("train_simple: abort (only %d rows, need >=30)", len(df))
+        return None,None,None,None,None,None
     meta=["ticker","name","sector","target_12m"]
     fcols=[c for c in df.columns if c not in meta and df[c].dtype in [np.float64,np.int64,float,int]]
     X=df[fcols].copy(); y=df["target_12m"].copy()
     medians=X.median()
+    n_nan_before = int(X.isna().sum().sum())
+    n_inf_before = int(np.isinf(X.to_numpy()).sum())
+    logger.info("train_simple: initial feature matrix shape=%s, NaN=%d, Inf=%d", X.shape, n_nan_before, n_inf_before)
     X=X.fillna(medians).replace([np.inf,-np.inf],np.nan).fillna(medians)
     # Rank transform + sector neutralize
     X = rank_features(X, fcols)
     X_neut = X.copy(); X_neut["sector"]=df["sector"].values
     X_neut = sector_neutralize(X_neut,fcols,"sector")
     X = X_neut.drop(columns=["sector"],errors="ignore")
+    # Safety net: ensure the training matrix is fully finite before passing to sklearn models.
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(0.0)
+    n_nan_after = int(X.isna().sum().sum())
+    n_inf_after = int(np.isinf(X.to_numpy()).sum())
+    logger.info(
+        "train_simple: cleaned feature matrix shape=%s, NaN=%d, Inf=%d",
+        X.shape,
+        n_nan_after,
+        n_inf_after,
+    )
     # Safety net: some sector-neutralization implementations can reintroduce NaNs.
     # Ensure the training matrix is fully finite before passing to sklearn models.
     X = X.replace([np.inf, -np.inf], np.nan)
     # Fill remaining NaNs with 0 (neutral value in ranked/neutralized space)
     X = X.fillna(0.0)
     if callback: callback("Training ensemble (simple mode)...")
+    logger.info("train_simple: training ensemble on %d samples, %d features", X.shape[0], X.shape[1])
     ensemble = {}
     for name,m in _get_models().items():
         try:
