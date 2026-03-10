@@ -1026,6 +1026,32 @@ def detect_market_regime(prices, macro=None, regime_config=None):
 
 
 # ══════════════════════════════════════════════════════════════
+# MODEL HEALTH (diagnostic for UI)
+# ══════════════════════════════════════════════════════════════
+def assess_model_health(oos_metrics):
+    """Return (verdict, color, message) for display in Rankings tab. oos_metrics = model_info from run."""
+    if not oos_metrics or not isinstance(oos_metrics, dict):
+        return "—", "#71717a", "Run model to see health."
+    ic = oos_metrics.get("mean_ic", 0)
+    icir = oos_metrics.get("ic_ir", 0)
+    hit = oos_metrics.get("hit_rate", 0)
+    if ic is None or (isinstance(ic, float) and ic != ic):
+        ic = 0
+    if hit is None or (isinstance(hit, float) and hit != hit):
+        hit = 0
+    if icir is None or (isinstance(icir, float) and icir != icir):
+        icir = 0
+    if ic > 0.05 and icir > 0.5 and hit > 0.6:
+        return "STRONG", "#34d399", "Consistent predictive signal detected."
+    elif ic > 0.02 and hit > 0.5:
+        return "MODERATE", "#fbbf24", "Some signal — rankings may shift between runs."
+    elif ic > 0:
+        return "WEAK", "#fb923c", "Weak signal — use rankings with caution."
+    else:
+        return "NO SIGNAL", "#f87171", "No predictive power. Rankings are effectively random."
+
+
+# ══════════════════════════════════════════════════════════════
 # PIPELINE ORCHESTRATOR
 # ══════════════════════════════════════════════════════════════
 def run_full_pipeline(callback=None):

@@ -84,8 +84,8 @@ DEFAULT_FEATURE_SETTINGS = {
     "value": True,
     "quality": True,
     "trend": True,
-    "macro": True,
-    "sentiment": True,
+    "macro": False,
+    "sentiment": False,
     "size": True,
 }
 

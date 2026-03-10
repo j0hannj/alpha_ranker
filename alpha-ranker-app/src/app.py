@@ -235,7 +235,14 @@ class AlphaRanker(ctk.CTk):
             self.pf_sell_tree.heading(c,text=h); self.pf_sell_tree.column(c,width=w,anchor="w" if c in ("ticker","reason") else "e")
         self.pf_sell_tree.pack(fill="x")
         self.pf_sell_tree.tag_configure("sell",foreground="#f87171"); self.pf_sell_tree.tag_configure("review",foreground="#fb923c"); self.pf_sell_tree.tag_configure("hold",foreground="#34d399")
+        sell_btns=ctk.CTkFrame(self.pf_sell_frame,fg_color="transparent")
+        sell_btns.pack(fill="x",pady=(2,0))
+        ctk.CTkButton(sell_btns,text="Accept Sell",width=100,height=26,font=("",10),fg_color="#991b1b",hover_color="#7f1d1d",
+                      command=self._accept_sell_from_selection).pack(side="left",padx=(0,6))
+        ctk.CTkButton(sell_btns,text="History",width=70,height=26,font=("",10),fg_color="#27272a",
+                      command=self._show_trade_history).pack(side="left")
         self.pf_sell_placeholder=ctk.CTkLabel(self.pf_sell_frame,text="Run the alpha model first (Rankings \u2192 Run Model) to evaluate sell signals.",font=("",10),text_color="#71717a",wraplength=300)
+        self._sell_signals=[]
         ctk.CTkLabel(rp,text="DCA Projection",font=("",11,"bold")).pack(padx=10,pady=(8,2))
         self.pf_proj=ctk.CTkFrame(rp,fg_color="#09090b",corner_radius=8)
         self.pf_proj.pack(fill="both",expand=True,padx=5,pady=3)
@@ -561,8 +568,13 @@ class AlphaRanker(ctk.CTk):
         self.rk_tree.tag_configure("warm",foreground="#fbbf24")
         self.rk_tree.tag_configure("normal",foreground="#e4e4e7")
         self.rk_tree.tag_configure("cold",foreground="#71717a")
+        self.rk_health_frame=ctk.CTkFrame(tab,fg_color="transparent")
+        self.rk_health_frame.grid(row=2,column=0,sticky="ew",padx=10,pady=(4,0))
+        self.rk_health_frame.grid_columnconfigure(0,weight=1)
+        self.rk_health_lbl=ctk.CTkLabel(self.rk_health_frame,text="Run model to see health.",font=("",10),text_color="#71717a")
+        self.rk_health_lbl.grid(row=0,column=0,sticky="w")
         self.rk_compare_frame=ctk.CTkFrame(tab,fg_color="transparent")
-        self.rk_compare_frame.grid(row=2,column=0,sticky="ew",padx=10,pady=(4,0))
+        self.rk_compare_frame.grid(row=3,column=0,sticky="ew",padx=10,pady=(4,0))
         self.rk_compare_frame.grid_columnconfigure(0,weight=1)
         ctk.CTkLabel(self.rk_compare_frame,text="Model comparison (Rank IC): ",font=("",10,"bold"),text_color="#a1a1aa").grid(row=0,column=0,sticky="w")
         self.rk_compare_lbl=ctk.CTkLabel(self.rk_compare_frame,text="Run model to see per-model IC.",font=("JetBrains Mono",9),text_color="#71717a")
@@ -604,14 +616,12 @@ class AlphaRanker(ctk.CTk):
                 if res is None: self.after(0,lambda:self.rk_status.configure(text="Failed",text_color="#f87171")); return
                 self.model_results=res; self.feat_imp=fi; self.model_info=info; self.macro=mac
                 self.model_state=model.get_model_state()
-                try:
-                    portfolio.save_ranking_snapshot(res)
-                except Exception: pass
                 self._refresh_data_updated_label()
                 pmic=info.get("per_model_ic",{})
                 pm=" ".join(f"{n[:3]}:{v:.3f}" for n,v in pmic.items()) if pmic else str(info.get("n_stocks","?"))+" stocks"
                 self.after(0,lambda:self.rk_status.configure(text=f"IC:{info.get('spearman_rank_corr','?')} | {pm}",text_color="#34d399"))
                 self.after(0,self._upd_rankings)
+                self.after(0,self._refresh_display)
             except Exception as e:
                 self.after(0,lambda:self.rk_status.configure(text=f"Error: {str(e)[:60]}",text_color="#f87171"))
         threading.Thread(target=_train,daemon=True).start()
@@ -620,17 +630,29 @@ class AlphaRanker(ctk.CTk):
         if self.model_results is None: return
         hz=int(self.hz_var.get()); sc=lambda r: r if hz==12 else round(r*(hz/12)**0.75,1)
         df50=self.model_results.head(50).copy()
+        db_path=str(getattr(portfolio,"DB_PATH",None) or "")
         prev=portfolio.get_latest_snapshot_before()
-        history_by_ticker={}
-        for t in df50["ticker"].tolist():
-            history_by_ticker[t]=portfolio.get_ranking_history(t,20)
-        display_df=add_ranking_insights(df50,prev,history_by_ticker)
+        history_by_ticker={} if db_path else {t:portfolio.get_ranking_history(t,20) for t in df50["ticker"].tolist()}
+        display_df=add_ranking_insights(df50,prev,history_by_ticker,db_path=db_path if db_path else None)
+        try:
+            portfolio.save_ranking_snapshot(self.model_results)
+        except Exception: pass
         self._rankings_display_df=display_df
         try:
             last_run=portfolio.get_current_run_timestamp()
             if last_run and hasattr(self,"rk_data_updated"):
                 self.rk_data_updated.configure(text=f"Last model run: {last_run}",text_color="#34d399")
         except Exception: pass
+        if hasattr(self,"rk_health_lbl") and self.model_info:
+            verdict,color,msg=model.assess_model_health(self.model_info)
+            ic=self.model_info.get("mean_ic"); hr=self.model_info.get("hit_rate"); icir=self.model_info.get("ic_ir")
+            def _num(x): return x is not None and (not isinstance(x,float) or x==x)
+            summary="Mean IC: "+f"{ic:.3f}" if _num(ic) else "Mean IC: —"
+            if _num(hr): summary+=f" | Hit rate: {hr*100:.0f}%"
+            if _num(icir): summary+=f" | ICIR: {icir:.2f}"
+            self.rk_health_lbl.configure(text=f"[{verdict}] {summary} — {msg}",text_color=color)
+        elif hasattr(self,"rk_health_lbl"):
+            self.rk_health_lbl.configure(text="Run model to see health.",text_color="#71717a")
         if hasattr(self,"rk_compare_lbl") and self.model_info:
             pm=self.model_info.get("per_model_ic") or {}
             if pm:

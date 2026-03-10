@@ -74,12 +74,39 @@ def _conn():
         run_id TEXT
     )""")
     c.execute("""CREATE INDEX IF NOT EXISTS idx_ranking_history_ticker_ts ON ranking_history(ticker, timestamp)""")
+    c.execute("""CREATE INDEX IF NOT EXISTS idx_ranking_history_run ON ranking_history(run_id)""")
+    # Migration: add columns for stability and model metrics
+    rh_info = {row[1] for row in c.execute("PRAGMA table_info(ranking_history)").fetchall()}
+    for col, spec in [("run_date", "TEXT"), ("alpha_score_raw", "REAL"), ("predicted_return_pct", "REAL"), ("model_agreement", "REAL")]:
+        if col not in rh_info:
+            c.execute(f"ALTER TABLE ranking_history ADD COLUMN {col} {spec}")
+    c.execute("""CREATE TABLE IF NOT EXISTS trade_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        holding_id INTEGER,
+        ticker TEXT NOT NULL,
+        action TEXT NOT NULL,
+        units REAL NOT NULL,
+        price REAL NOT NULL,
+        total_amount REAL,
+        pnl_realized REAL,
+        pnl_pct REAL,
+        currency TEXT DEFAULT 'EUR',
+        reason TEXT,
+        signal_data TEXT,
+        executed_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
     c.commit()
     return c
 
-def get_all():
+def get_all(include_sold=False):
+    """Return holdings. By default only OPEN (exclude SOLD). Use include_sold=True for history."""
     c = _conn()
-    rows = c.execute("SELECT * FROM holdings ORDER BY type, ticker").fetchall()
+    if include_sold:
+        rows = c.execute("SELECT * FROM holdings ORDER BY type, ticker").fetchall()
+    else:
+        rows = c.execute(
+            "SELECT * FROM holdings WHERE COALESCE(status,'OPEN') = 'OPEN' ORDER BY type, ticker"
+        ).fetchall()
     c.close()
     return [dict(r) for r in rows]
 
@@ -244,11 +271,11 @@ def init_default_portfolio():
 # RANKING HISTORY (for delta analysis and stability)
 # ══════════════════════════════════════════════════════════════
 def save_ranking_snapshot(results_df, run_id=None):
-    """Store current ranking for each asset. results_df must have columns: ticker, alpha_score, rank/alpha_rank, confidence."""
+    """Store current ranking for each asset. Persists run for stability comparison on next run."""
     if results_df is None or results_df.empty:
         return
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    run_id = run_id or ts
+    run_id = run_id or datetime.now().isoformat()
     c = _conn()
     rank_col = "rank" if "rank" in results_df.columns else "alpha_rank"
     for _, row in results_df.iterrows():
@@ -260,11 +287,33 @@ def save_ranking_snapshot(results_df, run_id=None):
         alpha = float(alpha) if alpha is not None and alpha == alpha else None
         conf = row.get("confidence")
         conf = float(conf) if conf is not None and conf == conf else None
+        raw = row.get("alpha_score_raw")
+        raw = float(raw) if raw is not None and raw == raw else None
+        pred = row.get("predicted_return_pct")
+        pred = float(pred) if pred is not None and pred == pred else None
+        agr = row.get("model_agreement_score")
+        agr = float(agr) if agr is not None and agr == agr else None
         c.execute(
-            "INSERT INTO ranking_history (ticker, alpha_score, rank_position, confidence, timestamp, run_id) VALUES (?,?,?,?,?,?)",
-            (ticker, alpha, rank_pos, conf, ts, run_id),
+            """INSERT INTO ranking_history (ticker, alpha_score, rank_position, confidence, timestamp, run_id, run_date, alpha_score_raw, predicted_return_pct, model_agreement)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (ticker, alpha, rank_pos, conf, ts, run_id, ts, raw, pred, agr),
         )
     c.commit()
+    c.close()
+    cleanup_old_history(keep_runs=20)
+
+
+def cleanup_old_history(keep_runs=20):
+    """Keep only the last keep_runs runs (by distinct timestamp)."""
+    c = _conn()
+    runs = c.execute(
+        "SELECT DISTINCT timestamp FROM ranking_history ORDER BY timestamp DESC"
+    ).fetchall()
+    if len(runs) > keep_runs:
+        old_ts = [r[0] for r in runs[keep_runs:]]
+        placeholders = ",".join("?" * len(old_ts))
+        c.execute(f"DELETE FROM ranking_history WHERE timestamp IN ({placeholders})", old_ts)
+        c.commit()
     c.close()
 
 
@@ -308,3 +357,32 @@ def get_current_run_timestamp():
     row = c.execute("SELECT timestamp FROM ranking_history ORDER BY timestamp DESC LIMIT 1").fetchone()
     c.close()
     return row[0] if row else None
+
+
+# ══════════════════════════════════════════════════════════════
+# TRADE HISTORY (sell execution audit)
+# ══════════════════════════════════════════════════════════════
+def log_sell_transaction(holding_id, ticker, units, price, avg_price, pnl_realized, pnl_pct, currency,
+                         reason=None, signal_data=None):
+    """Record a SELL in trade_history. Called after _process_sell."""
+    c = _conn()
+    total = round(units * price, 2)
+    c.execute(
+        """INSERT INTO trade_history
+           (holding_id, ticker, action, units, price, total_amount, pnl_realized, pnl_pct, currency, reason, signal_data)
+           VALUES (?, ?, 'SELL', ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (holding_id, ticker, units, price, total, round(pnl_realized, 2), round(pnl_pct, 2), currency,
+         reason, json.dumps(signal_data, default=str) if signal_data else None),
+    )
+    c.commit()
+    c.close()
+
+
+def get_trade_history(limit=100):
+    """Return recent trades (SELLs) for the History UI."""
+    c = _conn()
+    rows = c.execute(
+        "SELECT * FROM trade_history ORDER BY executed_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
