@@ -968,8 +968,17 @@ def _deterministic_suggestions(ticker: str) -> list:
 
 def repair_universe(callback=None, cancel_event=None, dry_run=False, api_key=None):
     """
-    AI-assisted universe repair. Iterates over suspect tickers, uses LLM or deterministic
-    rules to suggest corrections, validates via yfinance, then applies or removes.
+    AI-assisted universe repair.
+
+    Updated behaviour:
+    - Iterate over the *entire* DB universe (not only obviously suspect tickers).
+    - For each ticker:
+        1) Try to validate the raw ticker via yfinance.
+        2) If validation fails, try to repair:
+            - First using a sanitized version (strip prefixes/unicode/etc.),
+            - Then, if available, LLM suggestions,
+            - Finally deterministic pattern-based suggestions.
+        3) If no candidate validates, delete the ticker from the universe.
     """
     import time
     try:
@@ -979,12 +988,12 @@ def repair_universe(callback=None, cancel_event=None, dry_run=False, api_key=Non
             callback("Repair: could not load portfolio module.")
         return {"fixed": [], "removed": [], "skipped": []}
 
-    raw = portfolio.get_universe() or {}
-    universe = dict(raw)
-    suspects = _find_suspect_tickers(universe)
+    universe = dict(portfolio.get_universe() or {})
+    items = list(universe.items())
+    n_total = len(items)
 
     if callback:
-        callback(f"Repair: {len(suspects)} suspect tickers to process", progress=0)
+        callback(f"Repair: {n_total} tickers to validate/repair", progress=0)
 
     fixed, removed, skipped = [], [], []
     use_llm = False
@@ -994,15 +1003,37 @@ def repair_universe(callback=None, cancel_event=None, dry_run=False, api_key=Non
     except Exception:
         pass
 
-    for i, (ticker, info) in enumerate(suspects):
+    for i, (ticker, info) in enumerate(items):
         if cancel_event and cancel_event.is_set():
             break
         if callback:
-            callback(f"Repair {i+1}/{len(suspects)}: {ticker}...", progress=(i + 1) / max(len(suspects), 1))
+            callback(f"Repair {i+1}/{n_total}: {ticker}...", progress=(i + 1) / max(n_total, 1))
 
-        suggestions = _ai_suggest_corrections(ticker, info, api_key) if use_llm else []
+        # 1) If raw ticker already validates on yfinance, keep it as-is
+        try:
+            if _validate_ticker_yfinance(ticker):
+                skipped.append(ticker)
+                continue
+        except Exception:
+            # Fall through to repair path
+            pass
+
+        # 2) Build candidate corrections: sanitized version, then AI, then deterministic
+        suggestions: list[str] = []
+        sanitized = _sanitize_ticker(ticker)
+        if sanitized and sanitized != ticker:
+            suggestions.append(sanitized)
+
+        if use_llm:
+            ai_sugs = _ai_suggest_corrections(ticker, info, api_key)
+            for s in ai_sugs:
+                if s not in suggestions:
+                    suggestions.append(s)
+
         if not suggestions:
-            suggestions = _deterministic_suggestions(ticker)
+            for s in _deterministic_suggestions(ticker):
+                if s not in suggestions:
+                    suggestions.append(s)
 
         resolved = False
         for suggestion in suggestions:
