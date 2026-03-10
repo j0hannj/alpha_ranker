@@ -708,6 +708,14 @@ class AlphaRanker(ctk.CTk):
         ctk.CTkLabel(self.rk_compare_frame,text="Model comparison (Rank IC): ",font=("",10,"bold"),text_color="#a1a1aa").grid(row=0,column=0,sticky="w")
         self.rk_compare_lbl=ctk.CTkLabel(self.rk_compare_frame,text="Run model to see per-model IC.",font=("JetBrains Mono",9),text_color="#71717a")
         self.rk_compare_lbl.grid(row=0,column=1,sticky="w",padx=(4,0))
+        self.rk_history_frame=ctk.CTkFrame(tab,fg_color="transparent")
+        self.rk_history_frame.grid(row=4,column=0,sticky="ew",padx=10,pady=(4,0))
+        self.rk_history_frame.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(self.rk_history_frame,text="Run history (IC, hit rate, long-short):",font=("",10,"bold"),text_color="#a1a1aa").grid(row=0,column=0,sticky="w")
+        self.rk_history_tree=ttk.Treeview(self.rk_history_frame,columns=("date","mode","ic","ic_ir","hit","ls"),show="headings",height=6,style="T.Treeview")
+        for col,head in [("date","Date"),("mode","Mode"),("ic","IC"),("ic_ir","IC IR"),("hit","Hit%"),("ls","L-S ret")]:
+            self.rk_history_tree.heading(col,text=head); self.rk_history_tree.column(col,width=72 if col!="date" else 100)
+        self.rk_history_tree.grid(row=1,column=0,sticky="ew",pady=(2,0))
 
     def _refresh_data_updated_label(self):
         """Set Rankings tab label to last data update time. Always show when we have model data."""
@@ -837,6 +845,19 @@ class AlphaRanker(ctk.CTk):
                 self.rk_compare_lbl.configure(text=txt[:200] if len(txt)>200 else txt,text_color="#e4e4e7")
             else:
                 self.rk_compare_lbl.configure(text="No per-model IC (single run).",text_color="#71717a")
+        if hasattr(self,"rk_history_tree"):
+            self.rk_history_tree.delete(*self.rk_history_tree.get_children())
+            try:
+                for r in portfolio.get_model_run_history(15):
+                    ts=r.get("run_timestamp") or "—"
+                    mode=(r.get("mode") or "—")[:12]
+                    ic=r.get("mean_ic"); ic_s=f"{ic:.3f}" if ic is not None and ic==ic else "—"
+                    icir=r.get("ic_ir"); icir_s=f"{icir:.2f}" if icir is not None and icir==icir else "—"
+                    hr=r.get("hit_rate"); hr_s=f"{100*(hr or 0):.0f}%" if hr is not None and hr==hr else "—"
+                    ls=r.get("mean_ls_return"); ls_s=f"{100*(ls or 0):.1f}%" if ls is not None and ls==ls else "—"
+                    self.rk_history_tree.insert("","end",values=(ts,mode,ic_s,icir_s,hr_s,ls_s))
+            except Exception as e:
+                logger.debug("_upd_rankings: model run history failed: %s", e)
         self.rk_tree.delete(*self.rk_tree.get_children())
         imap=get_isin_map()
         for _,r in display_df.iterrows():
