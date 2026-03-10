@@ -635,16 +635,19 @@ def predict_ensemble(models_dict, X, method="ic_weighted", return_per_model=Fals
         try:
             p = info["model"].predict(X)
             all_preds[name] = np.asarray(p)
-            weights[name] = max(info.get("ic",info.get("cv_r2",0.01)), 0.001)
+            ic_val = info.get("ic", info.get("cv_r2", 0.01))
+            weights[name] = (ic_val if (ic_val is not None and ic_val > 0) else 0.0)
         except Exception as e:
             logger.warning("predict_ensemble: model %s predict failed: %s", name, e)
     if not all_preds: return np.zeros(len(X)), {}
-    if method == "simple_average":
+    total_w = sum(weights.values())
+    if method == "simple_average" or total_w <= 0:
         final = np.mean(np.array(list(all_preds.values())), axis=0)
+        total_w = total_w or 1.0  # for blend display
     else:
-        total_w = sum(weights.values())
         final = sum(all_preds[n]*(weights[n]/total_w) for n in all_preds)
-    blend = {n:{"weight":round(weights[n]/sum(weights.values()),3),"mean_pred":round(float(np.mean(p)),4)}
+    w_sum = sum(weights.values()) or 1.0
+    blend = {n:{"weight":round(weights[n]/w_sum,3),"mean_pred":round(float(np.mean(p)),4)}
              for n,p in all_preds.items()}
     if return_per_model:
         blend["per_model_preds"] = all_preds  # name -> array of length n_samples
@@ -730,7 +733,7 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         if len(df)<20: continue
         df["period_idx"]=i; all_periods.append(df)
     if not all_periods:
-        if callback: callback("Not enough data"); return None,None,None,None,None
+        if callback: callback("Not enough data"); return None,None,None,None,None,None
     full_df = pd.concat(all_periods,ignore_index=True)
     all_num_cols = [c for c in full_df.columns if c not in meta_cols+["period_idx"]
                     and full_df[c].dtype in [np.float64,np.int64,float,int]]
@@ -743,9 +746,9 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         feat_cols = all_num_cols
     if callback: callback(f"{len(full_df)} obs, {len(feat_cols)} features, {full_df['period_idx'].nunique()} periods")
 
-    models_template = _get_models(config)
+    model_names = config.get("enabled_models") or list(_get_models(config).keys())
     period_indices = sorted(full_df["period_idx"].unique()); min_train=8
-    oos_preds=[]; per_model_oos = {n:[] for n in models_template.keys()}
+    oos_preds=[]; per_model_oos = {n:[] for n in model_names}
     ensemble_method = config.get("ensemble_method") or "ic_weighted_average"
     winsorize = config.get("winsorization", False)
     winsorize_q = config.get("winsorize_quantile", 0.02)
@@ -776,9 +779,7 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
             Xtr_r, _fitted = decorrelate_features(Xtr_r, feat_cols, method=method, variance_ratio=var_ratio)
             if _fitted is not None:
                 Xte_r, _ = decorrelate_features(Xte_r, feat_cols, method=method, variance_ratio=var_ratio, fitted_transformer=_fitted)
-        # Target winsorization (labels only): reduces impact of extreme forward returns during training.
-        # Do not clamp model predictions at inference; if predictions are unrealistic, fix target construction or horizon.
-        ytr = ytr.clip(ytr.quantile(0.02),ytr.quantile(0.98))
+        # Forward returns are never clipped; use robust models and feature winsorization for stability.
         models = _get_models(config)
         for name,m in models.items():
             try:
@@ -786,7 +787,8 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
                 p = m.predict(Xte_r)
                 ic = stats.spearmanr(p,yte.values)[0] if len(yte)>5 else 0
                 per_model_oos.setdefault(name, []).append(ic)
-            except Exception:
+            except Exception as e:
+                logger.debug("walk_forward_train OOS: %s failed: %s", name, e)
                 per_model_oos.setdefault(name, []).append(0)
         ens = {n: {"model": m, "ic": np.mean(per_model_oos.get(n,[])) or 0.01} for n, m in models.items()}
         ep,_ = predict_ensemble(ens,Xte_r, method=ensemble_method if isinstance(ensemble_method, str) else "ic_weighted_average")
@@ -831,8 +833,13 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         X_all["sector"] = full_df["sector"].values
         X_all = sector_neutralize(X_all,feat_cols,"sector")
         X_all = X_all.drop(columns=["sector"],errors="ignore")
-    # Same: target winsorization for final fit only; predictions are never clamped.
-    y_all = y_all.clip(y_all.quantile(0.02),y_all.quantile(0.98))
+    # Feature decorrelation on final training data: fit once, reuse at inference.
+    fitted_decorrelation = None
+    if config.get("feature_decorrelation"):
+        method = config.get("decorrelation_method", "pca")
+        var_ratio = float(config.get("pca_variance_ratio", 0.95))
+        X_all, fitted_decorrelation = decorrelate_features(X_all, feat_cols, method=method, variance_ratio=var_ratio)
+    # Forward returns are never clipped.
     final_models = {}
     for name,m in _get_models(config).items():
         try:
@@ -844,15 +851,16 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         except Exception as e:
             logger.warning("walk_forward final fit: %s failed: %s", name, e)
     feat_imp = _get_feature_importance(final_models,feat_cols)
-    return final_models, med_final, feat_cols, feat_imp, oos_metrics
+    return final_models, med_final, feat_cols, feat_imp, oos_metrics, fitted_decorrelation
 
 # ══════════════════════════════════════════════════════════════
 # CURRENT PREDICTIONS → ALPHA SCORE + RANK
 # ══════════════════════════════════════════════════════════════
 def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
                     macro, sector_map, tickers, yf_info=None, callback=None, config=None, as_of_date=None,
-                    macro_by_region=None):
-    """Generate current alpha scores and ranks using the trained ensemble. as_of_date: use last price date when set for reproducibility."""
+                    macro_by_region=None, fitted_decorrelation=None):
+    """Generate current alpha scores and ranks using the trained ensemble. as_of_date: use last price date when set for reproducibility.
+    fitted_decorrelation: when feature_decorrelation is enabled, the transformer fitted at training time (do not refit at inference)."""
     if config is None:
         try:
             from core.engine_config import get_model_settings
@@ -902,11 +910,11 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
         X_neut["sector"] = df["sector"].values
         X_neut = sector_neutralize(X_neut, feat_cols, "sector")
         X = X_neut.drop(columns=["sector"], errors="ignore")
-    # Feature decorrelation (mirror training pipeline; re-fit on current X, TODO: reuse fitted from training)
-    if config.get("feature_decorrelation"):
-        method = config.get("decorrelation_method", "pca")
-        var_ratio = float(config.get("pca_variance_ratio", 0.95))
-        X, _ = decorrelate_features(X, feat_cols, method=method, variance_ratio=var_ratio)
+    # Feature decorrelation: use transformer fitted at training; never refit at inference.
+    if config.get("feature_decorrelation") and fitted_decorrelation is not None:
+        X, _ = decorrelate_features(X, feat_cols, fitted_transformer=fitted_decorrelation)
+    elif config.get("feature_decorrelation") and fitted_decorrelation is None:
+        logger.warning("predict_current: feature_decorrelation enabled but no fitted_transformer provided; skipping decorrelation")
     n_models = sum(1 for info in models_dict.values() if info.get("model") is not None)
     preds, blend = predict_ensemble(models_dict, X, method=ensemble_method, return_per_model=(n_models > 1))
 
@@ -920,19 +928,18 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     else:
         df["model_agreement_score"] = 1.0
 
-    # Raw alpha score before factor neutralization
+    # Return prediction: raw model output (never use neutralized score for predicted return).
     df["alpha_score_raw"] = preds
     df["alpha_score_raw"] = df["alpha_score_raw"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    # Factor-neutralized alpha score (size / risk / momentum / sector)
+    df["predicted_return_pct"] = (df["alpha_score_raw"] * 100).round(2)
+    df["predicted_return_pct"] = df["predicted_return_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    # Ranking signal: derived from raw score after factor neutralization; affects only rank, not predicted return.
     df["alpha_score"] = factor_neutralize_scores(
         df,
         score_col="alpha_score_raw",
         sector_col="sector"
     )
     df["alpha_score"] = df["alpha_score"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    # predicted_return_pct must use raw score (return space); alpha_score is z-score for ranking only
-    df["predicted_return_pct"] = (df["alpha_score_raw"] * 100).round(2)
-    df["predicted_return_pct"] = df["predicted_return_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     df = df.sort_values("alpha_score", ascending=False).reset_index(drop=True)
     df["alpha_rank"] = range(1, len(df) + 1)
     df["rank"] = df["alpha_rank"]  # backward compat
@@ -1407,8 +1414,7 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
         Xtr = rank_features(Xtr, fcols)
         Xte = rank_features(Xte, fcols)
 
-        ytr = ytr.clip(ytr.quantile(0.02), ytr.quantile(0.98))
-
+        # Forward returns are never clipped.
         models = _get_models()
         for name, m in models.items():
             try:
@@ -1441,7 +1447,7 @@ def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores
     X_all = X_all.fillna(medians).replace([np.inf, -np.inf], np.nan).fillna(medians)
     X_all = rank_features(X_all, fcols)
     X_all = X_all.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    y_all = y_all.clip(y_all.quantile(0.02), y_all.quantile(0.98))
+    # Forward returns are never clipped.
 
     ensemble = {}
     for name, m in _get_models().items():
@@ -1706,8 +1712,8 @@ def run_full_pipeline(callback=None):
         try:
             test = fetch_fmp_quarterly("AAPL", fmp_key)
             fmp_works = len(test) > 0
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("run_full_pipeline: FMP test (AAPL) failed: %s", e)
         used_yahoo_fallback = False
         if fmp_works:
             if callback:
@@ -1738,7 +1744,7 @@ def run_full_pipeline(callback=None):
             if wf[0] is None:
                 if callback: callback(f"  {lbl}: insufficient data, skipping", (idx + 1) / total_h)
                 continue
-            final_models,medians,feat_cols,feat_imp,oos_metrics = wf
+            final_models,medians,feat_cols,feat_imp,oos_metrics,fitted_decorrelation = wf
             if config_h.get("execution_mode") == "single":
                 single_id = config_h.get("single_model_id")
                 if single_id and single_id in final_models:
@@ -1746,7 +1752,7 @@ def run_full_pipeline(callback=None):
             results_h,blend = predict_current(final_models,medians,feat_cols,prices,fund_db,
                                             macro,sector_map,list(yf_fund.keys()),
                                             yf_info=yf_fund,callback=callback,config=config_h,as_of_date=as_of_date,
-                                            macro_by_region=macro_by_region)
+                                            macro_by_region=macro_by_region,fitted_decorrelation=fitted_decorrelation)
             if sentiment: results_h["news_sentiment"] = results_h["ticker"].map(sentiment).fillna(0)
             all_horizon_results[H] = {"results": results_h,"feat_imp": feat_imp,"oos_metrics": oos_metrics,"blend": blend}
             if callback: callback(f"  {lbl} done: IC={oos_metrics.get('spearman_rank_corr','?')} | {len(results_h)} stocks", (idx + 1) / total_h)
@@ -1784,8 +1790,8 @@ def run_full_pipeline(callback=None):
     try:
         from core import portfolio
         portfolio.save_ranking_snapshot(results)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("run_full_pipeline: save_ranking_snapshot failed: %s", e)
     _save_cache(results,feat_imp,model_info,macro,all_horizons=all_horizon_results)
     return results,feat_imp,model_info,macro,all_horizon_results
 
@@ -1806,8 +1812,8 @@ def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,dat
     try:
         from core import portfolio
         portfolio.save_ranking_snapshot(results)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("_run_simple: save_ranking_snapshot failed: %s", e)
     _save_cache(results,feat_imp,oos,macro)
     return results,feat_imp,oos,macro,None
 

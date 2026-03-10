@@ -281,15 +281,15 @@ class AlphaRanker(ctk.CTk):
         self.pf_lbl["pct"].configure(text=f"{pnl['total_pnl_pct']:+.1f}%",text_color=c)
         self.pf_tree.delete(*self.pf_tree.get_children())
         imap=get_isin_map()
-        for h in pnl["holdings"]:
-            cur="\u20ac" if h["currency"]=="EUR" else "$" if h["currency"]=="USD" else "\u00a3"
-            price_ts=h.get("price_timestamp") or ""
-            disp_id=h.get("isin") or get_display_id(h["ticker"],imap)
-            self.pf_tree.insert("","end",iid=str(h["id"]),
-                values=(disp_id,h["ticker"],h["type"].upper(),h["units"],f"{h['avg_price']}{cur}",
-                       f"{h.get('current_price','?')}{cur}",price_ts[:16] if price_ts else "—",
-                       f"{h['value']:,.0f}\u20ac",f"{h['pnl']:+,.0f}\u20ac",f"{h['pnl_pct']:+.1f}%"),
-                tags=("pos" if h["pnl"]>=0 else "neg",))
+        for holding in pnl["holdings"]:
+            cur="\u20ac" if holding["currency"]=="EUR" else "$" if holding["currency"]=="USD" else "\u00a3"
+            price_ts=holding.get("price_timestamp") or ""
+            disp_id=holding.get("isin") or get_display_id(holding["ticker"],imap)
+            self.pf_tree.insert("","end",iid=str(holding["id"]),
+                values=(disp_id,holding["ticker"],holding["type"].upper(),holding["units"],f"{holding['avg_price']}{cur}",
+                       f"{holding.get('current_price','?')}{cur}",price_ts[:16] if price_ts else "—",
+                       f"{holding['value']:,.0f}\u20ac",f"{holding['pnl']:+,.0f}\u20ac",f"{holding['pnl_pct']:+.1f}%"),
+                tags=("pos" if holding["pnl"]>=0 else "neg",))
         self.pf_sec.configure(state="normal"); self.pf_sec.delete("1.0","end")
         for s in pnl["sectors"]:
             bar="\u2588"*int(s["pct"]/3)
@@ -770,8 +770,10 @@ class AlphaRanker(ctk.CTk):
         n_h=len(self.all_horizon_results)
         if hasattr(self,"rk_status"):
             self.rk_status.configure(text=f"Done: {n_h} horizons | IC:{info.get('spearman_rank_corr','?')} | {pm}",text_color="#34d399")
-        self.after(0,self._upd_rankings)
-        self.after(0,self._refresh_display)
+        # Refresh model screen immediately so results, metrics, rankings and portfolio suggestions are up to date.
+        self._upd_rankings()
+        self._refresh_display()
+        self.update_idletasks()
 
     def _on_train_error(self, err):
         if hasattr(self,"rk_progress"): self.rk_progress.pack_forget()
