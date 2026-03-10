@@ -1532,21 +1532,24 @@ class AlphaRanker(ctk.CTk):
 
     def _universe_fill_tickers(self):
         try:
-            from core.api_cache import get_stored_universe_list, get_cached_ticker_list, get_cache_status
-            tickers=get_stored_universe_list()
-            if not tickers:
-                tickers=get_cached_ticker_list()
-            imap=get_isin_map()
-            n_isins=sum(1 for t in tickers if imap.get(t))
+            # Univers principal: table 'universe' dans le portfolio DB
+            from core import portfolio
+            universe = portfolio.get_universe() or {}
+            tickers = sorted(universe.keys())
+            imap = get_isin_map()
+            n_isins = sum(1 for t in tickers if imap.get(t))
             if tickers:
                 self._universe_count_lbl.configure(text=f"{len(tickers)} titres — {n_isins} ISIN")
             else:
-                self._universe_count_lbl.configure(text="Aucun (lancer un fetch data)")
+                self._universe_count_lbl.configure(text="Aucun titre (lancer un scan ou un run modèle)")
         except Exception:
-            tickers=[]; imap={}; self._universe_count_lbl.configure(text="")
-        for c in self._universe_tree.get_children(""): self._universe_tree.delete(c)
-        for sym in sorted(tickers):
-            self._universe_tree.insert("","end",values=(get_display_id(sym,imap),sym))
+            tickers = []
+            imap = {}
+            self._universe_count_lbl.configure(text="")
+        for c in self._universe_tree.get_children(""):
+            self._universe_tree.delete(c)
+        for sym in tickers:
+            self._universe_tree.insert("", "end", values=(get_display_id(sym, imap), sym))
 
     def _universe_refresh(self):
         self._universe_fill_tickers()
@@ -1576,7 +1579,8 @@ class AlphaRanker(ctk.CTk):
             messagebox.showerror("ISIN",f"Erreur: {e}")
 
     def _on_auto_fill_clicked(self):
-        # Ensure FMP_API_KEY is available for auto-fill (same as in _run_model)
+        # Ce bouton utilise désormais le nouveau scanner FMP + DB universe
+        # 1) S'assurer que la clé FMP est disponible (comme pour le modèle)
         try:
             from core import portfolio
             fmp_key = getattr(portfolio, "get_setting", None) and portfolio.get_setting("fmp_key")
@@ -1584,38 +1588,55 @@ class AlphaRanker(ctk.CTk):
                 os.environ["FMP_API_KEY"] = fmp_key
         except Exception:
             pass
+        # 2) Lire la taille actuelle de l'univers (avant scan)
         try:
-            target_str = self._universe_target_entry.get().strip() or "500"
-            target = int(target_str)
-        except ValueError:
-            target = 500
-        try:
-            from core.api_cache import get_isin_map
-            tickers = get_stored_universe_list()
-            imap = get_isin_map()
-            current_valid = sum(1 for t in tickers if imap.get(t))
+            from core import portfolio as _pf
+            before_universe = _pf.get_universe() or {}
+            before_n = len(before_universe)
         except Exception:
-            current_valid = 0
-        if current_valid>=target:
-            messagebox.showinfo("Auto-Fill",f"L'univers atteint déjà la cible ({current_valid}/{target}).")
-            return
+            before_n = 0
+        # UI: état "en cours"
         self._btn_auto_fill.configure(state="disabled")
-        self._universe_progress.set(0); self._universe_progress.grid(); self._universe_status_lbl.grid(); self._universe_status_lbl.configure(text="Préparation…")
-        self._btn_auto_fill_cancel.grid()
-        self._universe_auto_fill_cancel_event=threading.Event()
-        def progress_cb(current,total,msg):
+        self._universe_progress.set(0)
+        self._universe_progress.grid()
+        self._universe_status_lbl.grid()
+        self._universe_status_lbl.configure(text="Scan de l'univers en cours…")
+        self._btn_auto_fill_cancel.grid_remove()
+        self._universe_auto_fill_cancel_event = None
+
+        def scan_cb(msg):
             def _update():
-                if total>0:
-                    self._universe_progress.set(current/total)
-                self._universe_status_lbl.configure(text=f"Ajout en cours… {current}/{total} — {msg}")
-            self.after(0,_update)
-        region_map={"Global":"global","US uniquement":"us","Europe uniquement":"europe","Asie uniquement":"asia"}
-        region=region_map.get(self._universe_region_var.get(),"global")
+                self._universe_status_lbl.configure(text=str(msg)[:85])
+            self.after(0, _update)
+
         def worker():
-            from data.universe_builder import auto_fill_universe
-            r=auto_fill_universe(target_count=target,region=region,progress_callback=progress_cb,cancel_event=self._universe_auto_fill_cancel_event)
-            self.after(0,lambda:self._on_auto_fill_complete(r))
-        threading.Thread(target=worker,daemon=True).start()
+            try:
+                from core import data as core_data
+                universe = core_data.scan_and_expand_universe(callback=scan_cb) or {}
+                after_n = len(universe)
+                added_n = max(0, after_n - before_n)
+                result = {
+                    "added": list(universe.keys())[-added_n:] if added_n > 0 else [],
+                    "failed": [],
+                    "universe_size": after_n,
+                    "target_reached": added_n > 0,
+                    "sources_used": ["FMP screener"],
+                }
+            except Exception as e:
+                err = str(e)
+                def _err():
+                    messagebox.showerror("Auto-Fill", f"Erreur pendant le scan: {err}")
+                self.after(0, _err)
+                result = {
+                    "added": [],
+                    "failed": [],
+                    "universe_size": before_n,
+                    "target_reached": False,
+                    "sources_used": [],
+                }
+            self.after(0, lambda r=result: self._on_auto_fill_complete(r))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_auto_fill_cancel(self):
         if getattr(self,"_universe_auto_fill_cancel_event",None):
