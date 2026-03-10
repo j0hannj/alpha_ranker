@@ -45,14 +45,6 @@
   },
   {
     "role": "assistant",
-    "content": ""
-  },
-  {
-    "role": "user",
-    "content": "Give me a SHORT morning market briefing in French. Include:\n1. How my portfolio is doing today (use the P&L data you have)\n2. Key market moves overnight (search news)\n3. Any news affecting my holdings specifically\n4. One actionable insight\nKeep it under 150 words. No greetings, go straight to the data."
-  },
-  {
-    "role": "assistant",
     "content": "PORTFOLIO: +868 EUR (+3,5 %)  \nIWDA.AS +2,9 % 19 279 EUR  \nVWCE.DE +14,4 % 3 514 EUR  \nAAPL –2,8 % 223 EUR  \nAMZN –5,4 % 184 EUR  \nAVGO +0,7 % 297 EUR  \nBRK‑B +0,8 % 855 EUR  \nGOOG –0,5 % 263 EUR  \nIONQ –19,3 % 93 EUR  \nMSFT –14,5 % 352 EUR  \nNVDA +0,9 % 157 EUR  \nPLTR –14,3 % 134 EUR  \n\n--- MARCHES NUITÉ ---\n\n[ACTION:search_news:overnight market moves]  \n[ACTION:search_news:AAPL]  \n[ACTION:search_news:AMZN]  \n[ACTION:search_news:AVGO]  \n[ACTION:search_news:BRK-B]  \n[ACTION:search_news:GOOG]  \n[ACTION:search_news:IONQ]  \n[ACTION:search_news:MSFT]  \n[ACTION:search_news:NVDA]  \n[ACTION:search_news:PLTR]  \n\n--- NOUVELLES SPÉCIFIQUES ---\n\n[ACTION:search_news:Apple]  \n[ACTION:search_news:Amazon]  \n[ACTION:search_news:Broadcom]  \n[ACTION:search_news:BlackRock]  \n[ACTION:search_news:Alphabet]  \n[ACTION:search_news:IonQ]  \n[ACTION:search_news:Microsoft]  \n[ACTION:search_news:NVIDIA]  \n[ACTION:search_news:Palantir]  \n\n--- INSIGHT ACTIONNEL ---\n\nCONSIDÉRANT LA CONCENTRATION TECH (+26 %) et LA PERTE FORTE DE IONQ, VOTRE DCA mensuel pourrait être alloué partiellement vers des actions de santé ou d'industrie (+10 %) pour réduire la volatilité tout en profitant de la hausse actuelle du marché européen."
   },
   {
@@ -198,5 +190,13 @@
   {
     "role": "assistant",
     "content": "PORTFOLIO : +1 182 EUR (+4,8 %). Gains principaux : IWDA.AS (+4,3 %) et VWCE.DE (+15,9 %). Tech en baisse : AAPL –2,8 %, AMZN –5,4 %, MSFT –14,5 %, PLTR –14,3 %, IONQ –19,3 %.  \nMARCHÉ : [ACTION:search_news:European markets overnight]  \nACTUALITÉS : [ACTION:search_news:AAPL] [ACTION:search_news:AMZN] [ACTION:search_news:MSFT] [ACTION:search_news:PLTR] [ACTION:search_news:IONQ]  \nACTION : Vendez une portion de MSFT ou PLTR pour réduire l’exposition tech et atténuer la volatilité."
+  },
+  {
+    "role": "user",
+    "content": "Give me a SHORT morning market briefing in French. Include:\n1. How my portfolio is doing today (use the P&L data you have)\n2. Key market moves overnight (search news)\n3. Any news affecting my holdings specifically\n4. One actionable insight\nKeep it under 150 words. No greetings, go straight to the data."
+  },
+  {
+    "role": "assistant",
+    "content": "PORTFOLIO : +1 182 EUR (+4,8 %). Gains majeurs : IWDA.AS (+4,3 %) et VWCE.DE (+15,9 %). Tech en baisse : AAPL –2,8 %, AMZN –5,4 %, MSFT –14,5 %, PLTR –14,3 %, IONQ –19,3 %.  \nMARCHÉ : [ACTION:search_news:European markets overnight]  \nACTUALITÉS : [ACTION:search_news:AAPL] [ACTION:search_news:AMZN] [ACTION:search_news:MSFT] [ACTION:search_news:PLTR] [ACTION:search_news:IONQ]  \nACTION : Vendez une partie de MSFT ou PLTR pour réduire l’exposition tech et limiter la volatilité."
   }
 ]
