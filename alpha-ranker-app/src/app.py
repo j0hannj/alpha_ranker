@@ -1379,8 +1379,11 @@ class AlphaRanker(ctk.CTk):
                     if v: os.environ[s]=v
                 hz=int(self.bt_hz.get()); sy=int(self.bt_yr.get())
                 cb("Fetching data...")
-                # Pour le backtest, on veut les prix + infos de base, pas nécessairement l'univers complet multi-année
-                tickers, prices, yf = data.fetch_universe(years=hz, callback=cb)
+                # Pour le backtest, on veut les prix + infos de base pour un univers large
+                alldata = data.fetch_all_data(years=hz, callback=cb)
+                tickers = alldata.get("tickers") or []
+                prices = alldata.get("prices")
+                yf = alldata.get("fundamentals") or {}
                 mac=data.fetch_macro()
                 # Modélisation : uniquement titres avec ticker ET ISIN
                 try:

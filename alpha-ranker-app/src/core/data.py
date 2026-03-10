@@ -413,76 +413,6 @@ def _load_known_universe_as_fundamentals():
         return {}
 
 
-def _fetch_universe_fmp(api_key, callback=None):
-    """
-    FMP stock screener → 1000–2000+ global equities.
-    Primary source when FMP_API_KEY is configured.
-    Exchanges, min market cap and limit come from universe_settings (no hardcoded lists).
-    Returns (tickers, fundamentals_dict).
-    """
-    try:
-        from .engine_config import get_universe_settings
-        uv = get_universe_settings()
-    except Exception:
-        uv = {}
-    exchange_list = uv.get("fmp_exchanges") or []
-    min_cap = uv.get("fmp_min_market_cap") or 500_000_000
-    limit = uv.get("fmp_screener_limit") or 2000
-
-    tickers: list[str] = []
-    fundamentals: dict[str, dict] = {}
-
-    for exchange_str in exchange_list:
-        label = exchange_str.split(",")[0] if exchange_str else "?"
-        try:
-            if callback:
-                callback(f"FMP screener: {label}...")
-            url = (
-                "https://financialmodelingprep.com/api/v3/stock-screener"
-                f"?marketCapMoreThan={int(min_cap)}"
-                f"&isActivelyTrading=true"
-                f"&exchange={exchange_str}"
-                f"&limit={int(limit)}"
-                f"&apikey={api_key}"
-            )
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                data = json.loads(r.read().decode())
-
-            count = 0
-            today = datetime.now().strftime("%Y-%m-%d")
-            for item in data or []:
-                sym = item.get("symbol")
-                if not sym:
-                    continue
-                tickers.append(sym)
-                count += 1
-                fundamentals[sym] = {
-                    "date": today,
-                    "marketCap": item.get("marketCap") or item.get("mktCap"),
-                    "sector": item.get("sector"),
-                    "industry": item.get("industry"),
-                    "shortName": item.get("companyName"),
-                    "currentPrice": item.get("price"),
-                    "beta": item.get("beta"),
-                    "trailingPE": item.get("peRatio") if item.get("peRatio") else None,
-                    "forwardPE": item.get("peRatio"),
-                    "dividendYield": item.get("lastAnnualDividend"),
-                    "volume": item.get("volume"),
-                    "exchange": item.get("exchangeShortName"),
-                    "country": item.get("country"),
-                }
-            if callback:
-                callback(f"  {label}: {count} stocks")
-        except Exception as e:
-            logger.warning("FMP screener %s failed: %s", exchange_str, e)
-            if callback:
-                callback(f"  {label} ERROR: {e}")
-
-    tickers = sorted(set(tickers))
-    return tickers, fundamentals
-
-
 def _fetch_universe_yfinance(callback=None):
     """
     Fallback universe construction when no FMP key is available.
@@ -600,7 +530,8 @@ def _fetch_universe_yfinance(callback=None):
 def fetch_universe_cached(years=5, callback=None):
     """
     Cached universe (tickers + fundamentals), refreshed at most every 24h.
-    Primary source: FMP screener. If FMP_API_KEY is missing, no universe is built.
+    Source: scan_and_expand_universe, which only uses FMP free endpoints
+    (available-traded/list + profile) and yfinance fallback when FMP is blocked.
     """
     api_key = os.environ.get("FMP_API_KEY")
 
@@ -627,14 +558,12 @@ def fetch_universe_cached(years=5, callback=None):
                 callback(f"Cache error: {e}")
 
     if not api_key:
-        # Dans une vraie app financière, l'univers vient du data provider.
-        # Ici: FMP est obligatoire pour construire l'univers, on échoue explicitement.
-        if callback:
-            callback("FMP_API_KEY is not set. Configure it in Settings to build the equity universe.")
-        logger.warning("fetch_universe_cached: missing FMP_API_KEY, returning empty universe")
-        return [], {}
+        # Sans clé FMP, on laisse scan_and_expand_universe gérer la partie yfinance-only.
+        logger.warning("fetch_universe_cached: missing FMP_API_KEY, using scan_and_expand_universe without FMP")
 
-    tickers, fundamentals = _fetch_universe_fmp(api_key, callback)
+    # Utiliser le pipeline moderne qui n'appelle que des endpoints free ou yfinance.
+    fundamentals = scan_and_expand_universe(callback=callback) or {}
+    tickers = sorted(fundamentals.keys())
 
     try:
         UNIVERSE_CACHE.write_text(
@@ -643,7 +572,7 @@ def fetch_universe_cached(years=5, callback=None):
                     "tickers": tickers,
                     "fundamentals": fundamentals,
                     "date": datetime.now().isoformat(),
-                    "source": "fmp",
+                    "source": "scan_and_expand_universe",
                 },
                 default=str,
             ),
@@ -671,14 +600,15 @@ def _dataframe_from_cache_dict(cached):
 def fetch_universe(years=5, callback=None):
     """
     Build global equity universe.
-    PRIMARY source: FMP stock screener (requires FMP_API_KEY).
-    SECONDARY source: yfinance (no key, more limited).
+    PRIMARY source: scan_and_expand_universe (FMP free endpoints + yfinance fallback).
 
     For backward compatibility, returns (tickers, prices, fundamentals)
     even though prices are now usually downloaded in fetch_all_data.
     """
     import yfinance as yf
 
+    # Utiliser le même univers que le pipeline principal (scan_and_expand_universe),
+    # éventuellement mis en cache via fetch_universe_cached.
     tickers, fundamentals = fetch_universe_cached(years=years, callback=callback)
     if callback:
         callback(f"Universe: {len(tickers)} stocks")
