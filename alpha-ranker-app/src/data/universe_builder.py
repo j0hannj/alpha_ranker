@@ -14,6 +14,7 @@ unavailable.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import time
@@ -26,6 +27,24 @@ import pandas as pd
 from . import isin_mapper
 
 logger = logging.getLogger(__name__)
+
+# User-Agent for HTTP requests (Wikipedia blocks default Python/pandas)
+WIKI_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def _fetch_html(url: str) -> Optional[str]:
+    """Fetch URL with a browser-like User-Agent to avoid 403 from Wikipedia."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": WIKI_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.debug("Fetch %s failed: %s", url[:50], e)
+        return None
 
 
 @dataclass
@@ -159,7 +178,10 @@ def _source_wikipedia_sp500(needed: int) -> Iterator[List[Dict]]:
     """Yield S&P 500 constituents from Wikipedia (single batch)."""
     try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        tables = pd.read_html(url)
+        html = _fetch_html(url)
+        if not html:
+            raise RuntimeError("Failed to fetch page (403 or network)")
+        tables = pd.read_html(io.StringIO(html))
         df = tables[0]
         batch = []
         for _, row in df.iterrows():
@@ -183,7 +205,10 @@ def _source_wikipedia_stoxx600(needed: int) -> Iterator[List[Dict]]:
     """Yield STOXX 600 constituents from Wikipedia."""
     try:
         url = "https://en.wikipedia.org/wiki/STOXX_Europe_600"
-        tables = pd.read_html(url)
+        html = _fetch_html(url)
+        if not html:
+            raise RuntimeError("Failed to fetch page (403 or network)")
+        tables = pd.read_html(io.StringIO(html))
         for table in tables:
             cols = [str(c).lower() for c in table.columns]
             ticker_col = next((c for c in table.columns if "ticker" in str(c).lower() or "symbol" in str(c).lower()), None)
@@ -209,7 +234,10 @@ def _source_wikipedia_ftse100(needed: int) -> Iterator[List[Dict]]:
     """Yield FTSE 100 constituents from Wikipedia (Yahoo suffix .L)."""
     try:
         url = "https://en.wikipedia.org/wiki/FTSE_100_Index"
-        tables = pd.read_html(url)
+        html = _fetch_html(url)
+        if not html:
+            raise RuntimeError("Failed to fetch page (403 or network)")
+        tables = pd.read_html(io.StringIO(html))
         for table in tables:
             cols = [str(c).lower() for c in table.columns]
             ticker_col = next((c for c in table.columns if "ticker" in str(c).lower() or "epic" in str(c).lower() or "symbol" in str(c).lower()), None)
@@ -236,7 +264,10 @@ def _source_wikipedia_nikkei225(needed: int) -> Iterator[List[Dict]]:
     """Yield Nikkei 225 constituents from Wikipedia (Yahoo suffix .T)."""
     try:
         url = "https://en.wikipedia.org/wiki/Nikkei_225"
-        tables = pd.read_html(url)
+        html = _fetch_html(url)
+        if not html:
+            raise RuntimeError("Failed to fetch page (403 or network)")
+        tables = pd.read_html(io.StringIO(html))
         for table in tables:
             ticker_col = next((c for c in table.columns if "ticker" in str(c).lower() or "code" in str(c).lower() or "symbol" in str(c).lower()), None)
             if ticker_col is None:
@@ -259,13 +290,19 @@ def _source_wikipedia_nikkei225(needed: int) -> Iterator[List[Dict]]:
 
 
 def _source_yfinance_screener(needed: int, market: str = "us") -> Iterator[List[Dict]]:
-    """Yield large-cap stocks from yfinance screener, paginated. Market: us, europe, asia."""
+    """Yield large-cap stocks from yfinance screener if available (many versions lack Screener)."""
+    try:
+        import yfinance as yf
+    except Exception:
+        return
+    if not getattr(yf, "Screener", None):
+        logger.debug("yfinance.Screener not available in this version, skipping screener source")
+        return
     page_size = 250
     offset = 0
     max_pages = 20
     for page in range(max_pages):
         try:
-            import yfinance as yf
             screener = yf.Screener()
             body = {
                 "offset": offset,
