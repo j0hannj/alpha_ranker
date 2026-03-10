@@ -1,0 +1,6 @@
+﻿
+# Generated data files
+alpha-ranker-app/db/*.db
+alpha-ranker-app/db/*.pkl
+alpha-ranker-app/db/*.json
+alpha-ranker-app/db/*.csv
