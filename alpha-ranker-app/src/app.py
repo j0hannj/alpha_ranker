@@ -235,11 +235,10 @@ class AlphaRanker(ctk.CTk):
             self.pf_sell_tree.heading(c,text=h); self.pf_sell_tree.column(c,width=w,anchor="w" if c in ("ticker","reason") else "e")
         self.pf_sell_tree.pack(fill="x")
         self.pf_sell_tree.tag_configure("sell",foreground="#f87171"); self.pf_sell_tree.tag_configure("review",foreground="#fb923c"); self.pf_sell_tree.tag_configure("hold",foreground="#34d399")
-        sell_btns=ctk.CTkFrame(self.pf_sell_frame,fg_color="transparent")
-        sell_btns.pack(fill="x",pady=(2,0))
-        ctk.CTkButton(sell_btns,text="Accept Sell",width=100,height=26,font=("",10),fg_color="#991b1b",hover_color="#7f1d1d",
+        self.pf_sell_btns=ctk.CTkFrame(self.pf_sell_frame,fg_color="transparent")
+        ctk.CTkButton(self.pf_sell_btns,text="Accept Sell",width=100,height=26,font=("",10),fg_color="#991b1b",hover_color="#7f1d1d",
                       command=self._accept_sell_from_selection).pack(side="left",padx=(0,6))
-        ctk.CTkButton(sell_btns,text="History",width=70,height=26,font=("",10),fg_color="#27272a",
+        ctk.CTkButton(self.pf_sell_btns,text="History",width=70,height=26,font=("",10),fg_color="#27272a",
                       command=self._show_trade_history).pack(side="left")
         self.pf_sell_placeholder=ctk.CTkLabel(self.pf_sell_frame,text="Run the alpha model first (Rankings \u2192 Run Model) to evaluate sell signals.",font=("",10),text_color="#71717a",wraplength=300)
         self._sell_signals=[]
@@ -401,11 +400,13 @@ class AlphaRanker(ctk.CTk):
             no_model = mr is None or (getattr(mr, "empty", True) and mr.empty)
             if no_model:
                 self.pf_sell_tree.pack_forget()
+                self.pf_sell_btns.pack_forget()
                 self.pf_sell_placeholder.pack(fill="x",pady=8,padx=4)
                 self._sell_signals=[]
                 return
             self.pf_sell_placeholder.pack_forget()
             self.pf_sell_tree.pack(fill="x")
+            self.pf_sell_btns.pack(fill="x",pady=(2,0))
             from portfolio import get_all_sell_signals
             signals=get_all_sell_signals(holdings,self.model_results,only_open=True)
             self._sell_signals=signals
