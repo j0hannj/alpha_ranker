@@ -5,6 +5,7 @@ The `UniverseBuilder` supports:
 - Named universes (e.g. 'msci_world') – pluggable in the future
 - Custom ISIN lists from CSV
 - Legacy ticker-based universes via `core.data.fetch_universe`
+- Auto-fill: fetch large-cap candidates and add until target count (with ISIN resolution)
 
 ISINs are treated as the primary identifier; tickers are resolved via the
 ISIN mapper where possible, with graceful degradation when mappings are
@@ -13,9 +14,10 @@ unavailable.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
