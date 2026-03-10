@@ -81,10 +81,10 @@ def scan_and_expand_universe(callback=None):
                 from datetime import datetime as dt
                 last_dt = dt.fromisoformat(last)
                 if (datetime.now() - last_dt).total_seconds() < scan_freq_h * 3600:
+                    # Tenter d'utiliser l'univers en cache seulement s'il n'est pas vide.
                     logger.info("scan_and_expand_universe: using cached scan (last=%s, freq_h=%s)", last, scan_freq_h)
                     if callback:
                         callback("Universe: using cached scan (recent).")
-                    # On utilise l'univers déjà en base, filtré par market cap
                     known = portfolio.get_universe() or {}
                     min_cap = uv.get("fmp_min_market_cap") or 500_000_000
                     today = datetime.now().strftime("%Y-%m-%d")
@@ -103,11 +103,17 @@ def scan_and_expand_universe(callback=None):
                         for t, info in known.items()
                         if (info.get("marketCap") or 0) >= min_cap
                     }
+                    if active:
+                        logger.info(
+                            "scan_and_expand_universe: returning cached DB universe of %d active stocks",
+                            len(active),
+                        )
+                        return active
+                    # Si le cache est vide, on FORCE un nouveau scan complet
                     logger.info(
-                        "scan_and_expand_universe: returning cached DB universe of %d active stocks",
-                        len(active),
+                        "scan_and_expand_universe: cached universe is empty (known=%d), forcing full rescan",
+                        len(known),
                     )
-                    return active
         except Exception:
             pass
 
