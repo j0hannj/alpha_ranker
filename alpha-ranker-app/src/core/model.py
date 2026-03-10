@@ -504,6 +504,8 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
             Xtr_r, _fitted = decorrelate_features(Xtr_r, feat_cols, method=method, variance_ratio=var_ratio)
             if _fitted is not None:
                 Xte_r, _ = decorrelate_features(Xte_r, feat_cols, method=method, variance_ratio=var_ratio, fitted_transformer=_fitted)
+        # Target winsorization (labels only): reduces impact of extreme forward returns during training.
+        # Do not clamp model predictions at inference; if predictions are unrealistic, fix target construction or horizon.
         ytr = ytr.clip(ytr.quantile(0.02),ytr.quantile(0.98))
         models = _get_models(config)
         for name,m in models.items():
@@ -557,6 +559,7 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
         X_all["sector"] = full_df["sector"].values
         X_all = sector_neutralize(X_all,feat_cols,"sector")
         X_all = X_all.drop(columns=["sector"],errors="ignore")
+    # Same: target winsorization for final fit only; predictions are never clamped.
     y_all = y_all.clip(y_all.quantile(0.02),y_all.quantile(0.98))
     final_models = {}
     for name,m in _get_models(config).items():
@@ -846,14 +849,16 @@ def explain_ranking_context(ticker, models_dict, medians, feat_cols, prices,
 # means 12% return over H months, NOT annualized. We never interpret a 1-year prediction
 # as a 2-year return; we compound explicitly: projected_price = current_price * (1+r)^(m/H).
 # When all_horizon_results is provided, each display horizon uses that horizon's prediction
-# when available (no extrapolation); otherwise we compound from primary horizon with clamped return.
+# when available (no extrapolation); otherwise we compound from primary horizon.
+# No clamping of predicted returns: unrealistic predictions must be fixed at the model/target level.
 def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_info=None, all_horizon_results=None):
     """Project future prices per holding from model predictions.
-    Uses model's prediction horizon (H months) so a 1-year prediction is never used as 2-year.
-    Formula: projected_price = current_price * (1 + r_H)^(m/H), with r_H = model return over H months.
-    Model-sourced returns are clamped to avoid unrealistic projections (e.g. -81% over 2Y).
+    Uses model's prediction horizon (H months) so a 12-month prediction is never used as 24-month.
+    Formula: projected_price = current_price * (1 + predicted_return); for horizon m when we have
+    a per-horizon prediction we use it once; else we compound: (1 + r_H)^(m/H).
     When all_horizon_results is provided (dict horizon_months -> {"results": df}), each display
     horizon m uses that horizon's predicted_return_pct when available (no extrapolation).
+    Predicted returns are not clamped; fix root causes (target, horizon, scaling) if outputs are unrealistic.
     """
     if horizons is None:
         horizons = [3, 6, 12, 24, 120]
@@ -862,10 +867,6 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
         H = int(model_info["prediction_horizon_months"])
     if H <= 0:
         H = 12
-    # Sanity clamp: avoid extreme model outputs (e.g. -81% over 2Y from a single prediction)
-    max_return_per_horizon = 0.50
-    if isinstance(model_info, dict) and model_info.get("max_projection_return_cap") is not None:
-        max_return_per_horizon = float(model_info["max_projection_return_cap"])
     etf_defaults = {"6AQQ.DE":0.11,"ANX.PA":0.11,"UST.PA":0.11,"NDXH":0.11,
                     "IWDA.AS":0.08,"SWDA.L":0.08,"VWCE.DE":0.08,"VWCE.L":0.08}
     etf_name_match = {"nasdaq":0.11, "msci world":0.08, "all-world":0.08, "ftse all":0.08}
@@ -883,8 +884,6 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
                 raw_pct = match.iloc[0].get("predicted_return_pct")
                 if raw_pct is not None and pd.notna(raw_pct):
                     r_H = float(raw_pct) / 100.0
-                    # Clamp to avoid unrealistic projections (prediction is for H months, not annual)
-                    r_H = max(-max_return_per_horizon, min(max_return_per_horizon, r_H))
                     from_model = True
         if r_H is None:
             r_H = etf_defaults.get(t)
@@ -907,7 +906,7 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
             "projection_trace": {
                 "model_horizon_months": H,
                 "model_return_pct": round(r_H * 100, 2),
-                "output_interpretation": f"Model predicted {H}-month simple return (not annualized). Applied once for {H}M; compounded for longer horizons. Model return clamped to ±{max_return_per_horizon*100:.0f}% per horizon.",
+                "output_interpretation": f"Model predicted {H}-month simple return (not annualized). Applied once for {H}M; compounded for longer horizons.",
                 "formula": "projected_price = current_price * (1 + r_H)^(display_months / H)",
                 "from_model": from_model,
                 "per_horizon": {},
@@ -927,7 +926,6 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
                         raw_m = match_m.iloc[0].get("predicted_return_pct")
                         if raw_m is not None and pd.notna(raw_m):
                             r_m = float(raw_m) / 100.0
-                            r_m = max(-max_return_per_horizon, min(max_return_per_horizon, r_m))
                             used_horizon_match = True
             if r_m is not None and used_horizon_match:
                 factor = 1.0 + r_m
