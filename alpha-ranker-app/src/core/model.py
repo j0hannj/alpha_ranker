@@ -87,6 +87,14 @@ def fetch_fmp_quarterly(ticker, api_key, limit=40):
     return results
 
 def fetch_all_fundamentals(tickers, api_key, callback=None):
+    try:
+        from .api_cache import get as cache_get, set as cache_set
+        cached = cache_get("fmp_fundamentals", "bulk", max_age_hours=7*24)
+        if cached and isinstance(cached, dict) and len(cached) > 50:
+            if callback: callback(f"FMP cache (SQLite): {len(cached)} tickers")
+            return cached
+    except Exception:
+        pass
     cache = {}
     if FUNDAMENTALS_CACHE.exists():
         try:
@@ -105,7 +113,12 @@ def fetch_all_fundamentals(tickers, api_key, callback=None):
             rows = fetch_fmp_quarterly(t,api_key)
             if rows: data[t]=rows
         except: pass
-    FUNDAMENTALS_CACHE.write_text(json.dumps({**data,"_date":datetime.now().isoformat()},default=str),encoding="utf-8")
+    payload = {**data, "_date": datetime.now().isoformat()}
+    FUNDAMENTALS_CACHE.write_text(json.dumps(payload, default=str), encoding="utf-8")
+    try:
+        cache_set("fmp_fundamentals", "bulk", data)
+    except Exception:
+        pass
     if callback: callback(f"FMP: {len(data)} tickers loaded")
     return data
 
@@ -1045,7 +1058,16 @@ def assess_model_health(oos_metrics):
     if icir is None or (isinstance(icir, float) and icir != icir):
         icir = 0
     if mode == "simple_ensemble":
-        return "SIMPLE", "#a1a1aa", "Momentum ranking only (no FMP/walk-forward). No OOS IC."
+        reason = oos_metrics.get("simple_reason", "")
+        if reason == "no_fmp_key":
+            msg = "Momentum only: add FMP API key in Settings → Portfolio/API keys for full model (fundamentals + multi-horizon)."
+        elif reason == "fmp_few_tickers":
+            msg = "Momentum only: FMP returned too few fundamentals (<30). Check API key or try again later."
+        elif reason == "all_horizons_failed":
+            msg = "Momentum only: all horizons failed (data/horizon). Check data range and FMP coverage."
+        else:
+            msg = "Momentum ranking only (no FMP or walk-forward). Add FMP key in Settings for full model."
+        return "SIMPLE", "#a1a1aa", msg
     if ic > 0.05 and icir > 0.5 and hit > 0.6:
         return "STRONG", "#34d399", "Consistent predictive signal detected."
     elif ic > 0.02 and hit > 0.5:
@@ -1105,20 +1127,23 @@ def run_full_pipeline(callback=None):
             config = {}
         fund_db = fetch_all_fundamentals(list(yf_fund.keys()),fmp_key,callback)
         if len(fund_db)<30:
-            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness")) + (None,)
+            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="fmp_few_tickers") + (None,)
         horizons = (config or {}).get("horizons", [3, 6, 12, 24, 120])
         primary_H = (config or {}).get("primary_horizon", 12)
         ref_year = as_of_date.year if as_of_date else datetime.now().year
         all_horizon_results = {}
-        for H in horizons:
-            if callback: callback(f"═══ Training {H}M horizon ═══")
+        total_h = len(horizons)
+        for idx, H in enumerate(horizons):
+            lbl = "10Y" if H == 120 else f"{H}M"
+            if callback:
+                callback(f"Training {lbl} horizon ({idx+1}/{total_h})...", (idx + 0.1) / total_h)
             config_h = {**(config or {}), "prediction_horizon_months": H}
             # Calibration window matches horizon: 10Y horizon → 10 years of data
             start_year_H = ref_year - max(H // 12, 1)
             wf = walk_forward_train(prices,fund_db,macro,sector_map,list(fund_db.keys()),
                                    start_year=start_year_H,horizon_months=H,callback=callback,config=config_h,as_of_date=as_of_date)
             if wf[0] is None:
-                if callback: callback(f"  {H}M: insufficient data, skipping")
+                if callback: callback(f"  {lbl}: insufficient data, skipping", (idx + 1) / total_h)
                 continue
             final_models,medians,feat_cols,feat_imp,oos_metrics = wf
             if config_h.get("execution_mode") == "single":
@@ -1130,9 +1155,9 @@ def run_full_pipeline(callback=None):
                                             yf_info=yf_fund,callback=callback,config=config_h,as_of_date=as_of_date)
             if sentiment: results_h["news_sentiment"] = results_h["ticker"].map(sentiment).fillna(0)
             all_horizon_results[H] = {"results": results_h,"feat_imp": feat_imp,"oos_metrics": oos_metrics,"blend": blend}
-            if callback: callback(f"  {H}M: IC={oos_metrics.get('spearman_rank_corr','?')} | {len(results_h)} stocks")
+            if callback: callback(f"  {lbl} done: IC={oos_metrics.get('spearman_rank_corr','?')} | {len(results_h)} stocks", (idx + 1) / total_h)
         if not all_horizon_results:
-            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness")) + (None,)
+            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="all_horizons_failed") + (None,)
         primary = all_horizon_results.get(primary_H) or next(iter(all_horizon_results.values()))
         results = primary["results"]
         feat_imp = primary["feat_imp"]
@@ -1150,18 +1175,19 @@ def run_full_pipeline(callback=None):
         _store_model_state(None, None, None, prices, fund_db, sector_map, yf_fund)
     else:
         if callback: callback("Simple mode (no FMP key)")
-        return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness")) + (None,)
+        return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="no_fmp_key") + (None,)
     data_freshness = alldata.get("data_freshness")
     if data_freshness:
         model_info["data_freshness"] = data_freshness
     _save_cache(results,feat_imp,model_info,macro,all_horizons=all_horizon_results)
     return results,feat_imp,model_info,macro,all_horizon_results
 
-def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,data_freshness=None):
+def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,data_freshness=None, simple_reason=None):
     r = train_simple(prices,yf_fund,macro,callback,sentiment)
-    if r[0] is None: return None,None,{"error":"Training failed"},macro
+    if r[0] is None: return None,None,{"error":"Training failed"},macro,None
     ensemble,med,fc,results,feat_imp,oos = r
     oos["prediction_horizon_months"] = 12
+    oos["simple_reason"] = simple_reason
     if data_freshness: oos["data_freshness"] = data_freshness
     _store_model_state(ensemble, med, fc, prices, {}, sector_map, yf_fund)
     _save_cache(results,feat_imp,oos,macro)

@@ -28,7 +28,22 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 # ── UNIVERSE ──────────────────────────────────────────────────
 def fetch_universe(years=5):
-    """Fetch S&P 500 universe + extras. Returns (tickers, prices_df, fundamentals_dict)."""
+    """Fetch S&P 500 universe + extras. Cached in SQLite 24h. Returns (tickers, prices_df, fundamentals_dict)."""
+    try:
+        from .api_cache import get, set
+        cached = get("yahoo_universe", str(years), max_age_hours=24)
+        if cached is not None and isinstance(cached, dict):
+            tickers = cached.get("tickers")
+            fundamentals = cached.get("fundamentals", {})
+            prices_json = cached.get("prices_json")
+            if tickers and prices_json is not None:
+                try:
+                    prices = pd.read_json(prices_json, orient="split")
+                    return tickers, prices, fundamentals
+                except Exception:
+                    pass
+    except Exception:
+        pass
     import yfinance as yf
     tickers = []
     try:
@@ -67,6 +82,12 @@ def fetch_universe(years=5):
                 ]}
             }
         except: pass
+    try:
+        from .api_cache import set
+        prices_json = prices.to_json(orient="split") if hasattr(prices, "to_json") and not prices.empty else "{}"
+        set("yahoo_universe", str(years), {"tickers": tickers, "fundamentals": fundamentals, "prices_json": prices_json})
+    except Exception:
+        pass
     return tickers, prices, fundamentals
 
 # ── SINGLE PRICE ──────────────────────────────────────────────
@@ -135,11 +156,18 @@ def fetch_ratios(ticker, api_key=None):
 
 # ── MACRO (FRED) ──────────────────────────────────────────────
 def fetch_macro():
-    """Fetch macro indicators from FRED. All timestamped."""
-    api_key = os.environ.get("FRED_API_KEY")
+    """Fetch macro indicators from FRED. Cached in SQLite 24h."""
+    try:
+        from .api_cache import get, set
+        cached = get("fred", "macro", max_age_hours=24)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
     fallback = {"date":datetime.now().strftime("%Y-%m-%d"),
                 "fed_funds_rate":4.5,"us_10y_yield":4.1,"yield_curve_slope":-0.4,
                 "cpi_yoy":3.0,"oil_price":80,"vix":22,"credit_spread":1.5}
+    api_key = os.environ.get("FRED_API_KEY")
     if not api_key: return fallback
     try:
         from fredapi import Fred
@@ -154,15 +182,26 @@ def fetch_macro():
             except: pass
         if "us_10y_yield" in macro and "us_2y_yield" in macro:
             macro["yield_curve_slope"] = round(macro["us_10y_yield"]-macro["us_2y_yield"],2)
+        try:
+            set("fred", "macro", macro)
+        except Exception:
+            pass
         return macro
     except: return fallback
 
 # ── FX (exchangerate.host + yfinance fallback) ────────────────
 def fetch_fx(base="EUR", targets=None):
-    """Fetch FX rates. Tries exchangerate.host, falls back to yfinance. Timestamped."""
+    """Fetch FX rates. Cached in SQLite 24h."""
     if targets is None: targets = ["USD","GBP","CHF"]
+    cache_key = f"{base}_{'_'.join(sorted(targets))}"
+    try:
+        from .api_cache import get, set
+        cached = get("fx", cache_key, max_age_hours=24)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
     rates = {"date": datetime.now().strftime("%Y-%m-%d"), "base": base}
-    # Try exchangerate.host (free, no key)
     try:
         url = f"https://api.exchangerate.host/latest?base={base}&symbols={','.join(targets)}"
         with urllib.request.urlopen(url, timeout=5) as r:
@@ -171,25 +210,32 @@ def fetch_fx(base="EUR", targets=None):
             for t in targets:
                 if t in data.get("rates",{}):
                     rates[f"{base}_{t}"] = round(data["rates"][t],4)
-            return rates
     except: pass
-    # Fallback: yfinance
-    try:
-        import yfinance as yf
-        for t in targets:
-            pair = f"{base}{t}=X"
-            p = yf.Ticker(pair).info.get("regularMarketPrice")
-            if p: rates[f"{base}_{t}"] = round(float(p),4)
-    except: pass
-    # Final fallback
+    if not any(f"{base}_{t}" in rates for t in targets):
+        try:
+            import yfinance as yf
+            for t in targets:
+                pair = f"{base}{t}=X"
+                p = yf.Ticker(pair).info.get("regularMarketPrice")
+                if p: rates[f"{base}_{t}"] = round(float(p),4)
+        except: pass
     if f"{base}_USD" not in rates: rates[f"{base}_USD"] = 1.08
     if f"{base}_GBP" not in rates: rates[f"{base}_GBP"] = 0.86
+    try:
+        set("fx", cache_key, rates)
+    except Exception:
+        pass
     return rates
 
 # ── COMBINED FETCH ────────────────────────────────────────────
 def fetch_all_data(tickers=None, years=5, callback=None):
     """Fetch all data sources in one call. Returns dict with timestamps.
     Used by run_full_pipeline to get everything needed."""
+    try:
+        from .api_cache import clear_older_than_days
+        clear_older_than_days(30)
+    except Exception:
+        pass
     if callback: callback("Fetching universe...")
     universe_tickers, prices, fundamentals = fetch_universe(years)
     if tickers: universe_tickers = list(set(universe_tickers + tickers))

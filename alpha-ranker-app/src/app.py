@@ -638,11 +638,14 @@ class AlphaRanker(ctk.CTk):
         self.rk_status.pack(side="left",padx=12)
         self.rk_data_updated=ctk.CTkLabel(top,text="",font=("",11),text_color="#34d399")
         self.rk_data_updated.pack(side="left",padx=12)
+        self.rk_progress=ctk.CTkProgressBar(top,width=180,height=8); self.rk_progress.pack(side="left",padx=6); self.rk_progress.set(0)
+        self.rk_progress.pack_forget()
         ff=ctk.CTkFrame(top,fg_color="transparent"); ff.pack(side="right")
         self.hz_var=ctk.StringVar(value="12")
         for m, lbl in [("3","3M"),("6","6M"),("12","12M"),("24","24M"),("120","10Y")]:
             ctk.CTkRadioButton(ff,text=lbl,variable=self.hz_var,value=m,font=("",10),
                               command=self._upd_rankings).pack(side="left",padx=2)
+        ctk.CTkLabel(ff,text="Horizon = best performers for that horizon. Run model to generate all.",font=("",9),text_color="#71717a").pack(side="left",padx=(8,0))
         cols=("rank","ticker","name","sector","change","stability","return","conviction","analyst","sentiment","pe","growth","fcf","mom")
         self.rk_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
         for c,h,w in zip(cols,["#","Ticker","Name","Sector","Change","Stability","Predicted","Conv","Analyst","Sent","P/E","Grwth","FCF","Mom"],
@@ -693,27 +696,50 @@ class AlphaRanker(ctk.CTk):
             if hasattr(self,"rk_data_updated"): self.rk_data_updated.configure(text="")
 
     def _run_model(self):
-        self.rk_status.configure(text="Training ensemble...",text_color="#fbbf24")
+        self.rk_status.configure(text="Training ensemble (all horizons)...",text_color="#fbbf24")
+        if hasattr(self,"rk_progress"):
+            self.rk_progress.pack(side="left",padx=6); self.rk_progress.set(0)
         def _train():
-            def cb(m): self.after(0,lambda m=m:self.rk_status.configure(text=m[:80]))
+            def cb(m, progress=None):
+                self.after(0,lambda m=m,p=progress:self._on_train_progress(m,p))
             try:
                 for k,s in [("fred_key","FRED_API_KEY"),("fmp_key","FMP_API_KEY"),("av_key","ALPHA_VANTAGE_KEY")]:
                     v=portfolio.get_setting(k)
                     if v: os.environ[s]=v
                 res,fi,info,mac,all_hr=model.run_full_pipeline(callback=cb)
-                if res is None: self.after(0,lambda:self.rk_status.configure(text="Failed",text_color="#f87171")); return
-                self.model_results=res; self.feat_imp=fi; self.model_info=info; self.macro=mac
-                self.all_horizon_results=all_hr if all_hr else {}
-                self.model_state=model.get_model_state()
-                self._refresh_data_updated_label()
-                pmic=info.get("per_model_ic",{})
-                pm=" ".join(f"{n[:3]}:{v:.3f}" for n,v in pmic.items()) if pmic else str(info.get("n_stocks","?"))+" stocks"
-                self.after(0,lambda:self.rk_status.configure(text=f"IC:{info.get('spearman_rank_corr','?')} | {pm}",text_color="#34d399"))
-                self.after(0,self._upd_rankings)
-                self.after(0,self._refresh_display)
+                self.after(0,lambda: self._on_train_done(res, fi, info, mac, all_hr))
             except Exception as e:
-                self.after(0,lambda:self.rk_status.configure(text=f"Error: {str(e)[:60]}",text_color="#f87171"))
+                self.after(0,lambda:self._on_train_error(str(e)[:60]))
         threading.Thread(target=_train,daemon=True).start()
+
+    def _on_train_progress(self, msg, progress=None):
+        if hasattr(self,"rk_status"):
+            self.rk_status.configure(text=(msg or "")[:85],text_color="#fbbf24")
+        if progress is not None and hasattr(self,"rk_progress"):
+            self.rk_progress.set(min(1.0, max(0.0, float(progress))))
+
+    def _on_train_done(self, res, fi, info, mac, all_hr):
+        if hasattr(self,"rk_progress"):
+            self.rk_progress.set(1.0)
+            self.after(500, lambda: getattr(self.rk_progress,"pack_forget",lambda:None)() if hasattr(self,"rk_progress") else None)
+        if res is None:
+            if hasattr(self,"rk_status"): self.rk_status.configure(text="Failed",text_color="#f87171")
+            return
+        self.model_results=res; self.feat_imp=fi; self.model_info=info; self.macro=mac
+        self.all_horizon_results=all_hr if all_hr else {}
+        self.model_state=model.get_model_state()
+        self._refresh_data_updated_label()
+        pmic=info.get("per_model_ic",{})
+        pm=" ".join(f"{n[:3]}:{v:.3f}" for n,v in pmic.items()) if pmic else str(info.get("n_stocks","?"))+" stocks"
+        n_h=len(self.all_horizon_results)
+        if hasattr(self,"rk_status"):
+            self.rk_status.configure(text=f"Done: {n_h} horizons | IC:{info.get('spearman_rank_corr','?')} | {pm}",text_color="#34d399")
+        self.after(0,self._upd_rankings)
+        self.after(0,self._refresh_display)
+
+    def _on_train_error(self, err):
+        if hasattr(self,"rk_progress"): self.rk_progress.pack_forget()
+        if hasattr(self,"rk_status"): self.rk_status.configure(text=f"Error: {err}",text_color="#f87171")
 
     def _upd_rankings(self):
         if self.model_results is None: return
@@ -721,6 +747,9 @@ class AlphaRanker(ctk.CTk):
         all_hr=getattr(self,"all_horizon_results",None) or {}
         if all_hr and hz in all_hr:
             df50=all_hr[hz]["results"].head(50).copy()
+            hz_lbl = "10Y" if hz == 120 else f"{hz}M"
+            if hasattr(self,"rk_status"):
+                self.rk_status.configure(text=f"Viewing: {hz_lbl} ranking (best performers for this horizon)", text_color="#34d399")
         else:
             df50=self.model_results.head(50).copy()
             if all_hr and not all_hr.get(hz):
@@ -1404,8 +1433,8 @@ class AlphaRanker(ctk.CTk):
         # API Keys
         ctk.CTkLabel(scroll,text="API Keys",font=("",15,"bold")).grid(row=row,column=0,columnspan=3,sticky="w",pady=(5,8)); row+=1
         for k,l,h in [("anthropic_key","Anthropic","console.anthropic.com"),
-            ("fred_key","FRED","fred.stlouisfed.org"),("fmp_key","FMP","financialmodelingprep.com"),
-            ("av_key","Alpha Vantage","alphavantage.co")]:
+            ("fred_key","FRED","fred.stlouisfed.org"),("fmp_key","FMP","financialmodelingprep.com (requis pour modèle complet)"),
+            ("av_key","Alpha Vantage","alphavantage.co (optionnel, fallback prix)")]:
             ctk.CTkLabel(scroll,text=l,font=("",11)).grid(row=row,column=0,sticky="w",padx=8,pady=3)
             e=ctk.CTkEntry(scroll,width=300,font=("JetBrains Mono",10),show="*")
             e.grid(row=row,column=1,sticky="w",pady=3); e.insert(0,portfolio.get_setting(k,""))
