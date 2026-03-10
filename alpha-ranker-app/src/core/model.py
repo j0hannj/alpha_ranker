@@ -1192,22 +1192,7 @@ def run_full_pipeline(callback=None):
     tickers = alldata["tickers"]; prices = alldata["prices"]
     yf_fund = alldata["fundamentals"]; macro = alldata["macro"]
     sentiment = alldata.get("sentiment",{})
-    # Modélisation : on n'utilise que les titres pour lesquels on a à la fois ticker ET ISIN
-    try:
-        from .api_cache import get_isin_map
-        isin_map = get_isin_map()
-        tickers_with_isin = [t for t in tickers if isin_map.get(t)]
-        if len(tickers_with_isin) < len(tickers) and callback:
-            callback(f"Modélisation: {len(tickers_with_isin)}/{len(tickers)} titres avec ISIN utilisés")
-        if tickers_with_isin:
-            tickers = tickers_with_isin
-            yf_fund = {t: yf_fund[t] for t in tickers if t in yf_fund}
-            if prices is not None and hasattr(prices, "columns") and isinstance(prices.columns, pd.MultiIndex):
-                keep = [c for c in prices.columns if isinstance(c, tuple) and len(c) == 2 and c[0] in tickers]
-                if keep:
-                    prices = prices[keep].copy()
-    except Exception:
-        pass
+    # Train on full universe. ISIN is used only for display (get_display_id) when available.
     sector_map = {t:f.get("sector","Unknown") for t,f in yf_fund.items()}
     fmp_key = os.environ.get("FMP_API_KEY")
     as_of_date = None
