@@ -10,6 +10,7 @@ from tkinter import ttk, messagebox
 import tkinter as tk
 from core import portfolio, data, model, agent
 from core.ranking_insights import add_ranking_insights
+from core.api_cache import get_isin_map, get_display_id
 from core.ollama_setup import (is_ollama_installed, is_ollama_running,
                                 full_setup as ollama_full_setup, MODELS as OLLAMA_MODELS)
 try:
@@ -216,11 +217,11 @@ class AlphaRanker(ctk.CTk):
                       command=self._add_dialog).pack(side="right",padx=3)
         ctk.CTkButton(bf,text="Delete",width=70,height=26,font=("",10),fg_color="#991b1b",
                       command=self._del_holding).pack(side="right",padx=3)
-        cols=("ticker","type","qty","pru","price","price_updated","value","pnl","pnl_pct")
+        cols=("isin","ticker","type","qty","pru","price","price_updated","value","pnl","pnl_pct")
         self.pf_tree=ttk.Treeview(tf,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["Ticker","Type","Qty","Cost","Price","Last update","Value","P&L","P&L%"],
-                          [70,42,48,68,68,115,72,72,58]):
-            self.pf_tree.heading(c,text=h); self.pf_tree.column(c,width=w,anchor="e" if c not in ("ticker","type") else "w")
+        for c,h,w in zip(cols,["ISIN","Ticker","Type","Qty","Cost","Price","Last update","Value","P&L","P&L%"],
+                          [100,70,42,48,68,68,115,72,72,58]):
+            self.pf_tree.heading(c,text=h); self.pf_tree.column(c,width=w,anchor="e" if c not in ("isin","ticker","type") else "w")
         self.pf_tree.grid(row=1,column=0,sticky="nsew",padx=5,pady=5)
         self.pf_tree.bind("<Double-1>",self._edit_holding)
         self.pf_tree.tag_configure("pos",foreground="#34d399"); self.pf_tree.tag_configure("neg",foreground="#f87171")
@@ -230,12 +231,12 @@ class AlphaRanker(ctk.CTk):
         self.pf_sec=ctk.CTkTextbox(rp,font=("JetBrains Mono",10),state="disabled",fg_color="#09090b",height=90)
         self.pf_sec.pack(fill="x",padx=5,pady=3)
         ctk.CTkLabel(rp,text="Sell Signals",font=("",11,"bold"),text_color="#f87171").pack(padx=10,pady=(6,2))
-        pf_sell_cols=("ticker","signal","urgency","strategy","pred","rank","agr","reason")
+        pf_sell_cols=("isin","ticker","signal","urgency","strategy","pred","rank","agr","reason")
         self.pf_sell_frame=ctk.CTkFrame(rp,fg_color="transparent")
         self.pf_sell_frame.pack(fill="x",padx=5,pady=3)
         self.pf_sell_tree=ttk.Treeview(self.pf_sell_frame,columns=pf_sell_cols,show="headings",style="T.Treeview",height=6)
-        for c,h,w in zip(pf_sell_cols,["Ticker","Signal","Urgency","Strategy","Pred%","Rank","Agr%","Reason"],[52,48,52,72,52,48,48,120]):
-            self.pf_sell_tree.heading(c,text=h); self.pf_sell_tree.column(c,width=w,anchor="w" if c in ("ticker","reason") else "e")
+        for c,h,w in zip(pf_sell_cols,["ISIN","Ticker","Signal","Urgency","Strategy","Pred%","Rank","Agr%","Reason"],[95,52,48,52,72,52,48,48,120]):
+            self.pf_sell_tree.heading(c,text=h); self.pf_sell_tree.column(c,width=w,anchor="w" if c in ("isin","ticker","reason") else "e")
         self.pf_sell_tree.pack(fill="x")
         self.pf_sell_tree.tag_configure("sell",foreground="#f87171"); self.pf_sell_tree.tag_configure("review",foreground="#fb923c"); self.pf_sell_tree.tag_configure("hold",foreground="#34d399")
         self.pf_sell_btns=ctk.CTkFrame(self.pf_sell_frame,fg_color="transparent")
@@ -263,11 +264,13 @@ class AlphaRanker(ctk.CTk):
         self.pf_lbl["pnl"].configure(text=f"{pnl['total_pnl']:+,.0f} EUR",text_color=c)
         self.pf_lbl["pct"].configure(text=f"{pnl['total_pnl_pct']:+.1f}%",text_color=c)
         self.pf_tree.delete(*self.pf_tree.get_children())
+        imap=get_isin_map()
         for h in pnl["holdings"]:
             cur="\u20ac" if h["currency"]=="EUR" else "$" if h["currency"]=="USD" else "\u00a3"
             price_ts=h.get("price_timestamp") or ""
+            disp_id=h.get("isin") or get_display_id(h["ticker"],imap)
             self.pf_tree.insert("","end",iid=str(h["id"]),
-                values=(h["ticker"],h["type"].upper(),h["units"],f"{h['avg_price']}{cur}",
+                values=(disp_id,h["ticker"],h["type"].upper(),h["units"],f"{h['avg_price']}{cur}",
                        f"{h.get('current_price','?')}{cur}",price_ts[:16] if price_ts else "—",
                        f"{h['value']:,.0f}\u20ac",f"{h['pnl']:+,.0f}\u20ac",f"{h['pnl_pct']:+.1f}%"),
                 tags=("pos" if h["pnl"]>=0 else "neg",))
@@ -414,6 +417,7 @@ class AlphaRanker(ctk.CTk):
             signals=get_all_sell_signals(holdings,self.model_results,only_open=True)
             self._sell_signals=signals
             self.pf_sell_tree.delete(*self.pf_sell_tree.get_children())
+            imap=get_isin_map()
             for s in signals:
                 pr=s.get("predicted_return_pct")
                 pred_str=f"{pr:+.1f}%" if pr is not None and (not isinstance(pr,float) or pr==pr) else "—"
@@ -425,8 +429,10 @@ class AlphaRanker(ctk.CTk):
                 if len(reason)>28: reason=reason[:26]+"…"
                 urgency=s.get("urgency") or "—"
                 tag="sell" if s.get("signal")=="SELL" else "review" if s.get("signal")=="REVIEW" else "hold"
+                tk=s.get("ticker","")
                 self.pf_sell_tree.insert("","end",values=(
-                    s.get("ticker",""),
+                    get_display_id(tk,imap),
+                    tk,
                     s.get("signal","HOLD"),
                     urgency,
                     (s.get("strategy") or "—")[:10],
@@ -505,16 +511,18 @@ class AlphaRanker(ctk.CTk):
         d=ctk.CTkToplevel(self); d.title("Trade History")
         d.geometry("720x400"); d.grab_set(); d.attributes("-topmost",True)
         ctk.CTkLabel(d,text="Trade History",font=("",16,"bold")).pack(pady=(12,8))
-        cols=("ticker","action","units","price","total","pnl","pnl_pct","reason","date")
+        cols=("isin","ticker","action","units","price","total","pnl","pnl_pct","reason","date")
         tree=ttk.Treeview(d,columns=cols,show="headings",style="T.Treeview",height=12)
-        for c,h in zip(cols,["Ticker","Action","Units","Price","Total","P&L","P&L%","Reason","Date"]):
-            tree.heading(c,text=h); tree.column(c,width=72 if c!="reason" else 180,anchor="e" if c not in ("ticker","reason","action") else "w")
+        for c,h in zip(cols,["ISIN","Ticker","Action","Units","Price","Total","P&L","P&L%","Reason","Date"]):
+            tree.heading(c,text=h); tree.column(c,width=95 if c=="isin" else 72 if c!="reason" else 180,anchor="e" if c not in ("isin","ticker","reason","action") else "w")
         tree.pack(fill="both",expand=True,padx=10,pady=5)
+        imap=get_isin_map()
         for r in portfolio.get_trade_history(80):
             reason=(r.get("reason") or "—")[:24]+"…" if (r.get("reason") or "") and len((r.get("reason") or ""))>24 else (r.get("reason") or "—")
             date_str=(r.get("executed_at") or "—")[:16] if r.get("executed_at") else "—"
+            tk=r.get("ticker","")
             tree.insert("","end",values=(
-                r.get("ticker",""), r.get("action","SELL"), r.get("units",0), r.get("price",0),
+                get_display_id(tk,imap), tk, r.get("action","SELL"), r.get("units",0), r.get("price",0),
                 r.get("total_amount",0), r.get("pnl_realized",0), f"{r.get('pnl_pct',0):.1f}%" if r.get("pnl_pct") is not None else "—",
                 reason, date_str,
             ))
@@ -647,11 +655,11 @@ class AlphaRanker(ctk.CTk):
             ctk.CTkRadioButton(ff,text=lbl,variable=self.hz_var,value=m,font=("",10),
                               command=self._upd_rankings).pack(side="left",padx=2)
         ctk.CTkLabel(ff,text="Horizon = best performers for that horizon. Run model to generate all.",font=("",9),text_color="#71717a").pack(side="left",padx=(8,0))
-        cols=("rank","ticker","name","sector","change","stability","return","conviction","analyst","sentiment","pe","growth","fcf","mom")
+        cols=("rank","isin","ticker","name","sector","change","stability","return","conviction","analyst","sentiment","pe","growth","fcf","mom")
         self.rk_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["#","Ticker","Name","Sector","Change","Stability","Predicted","Conv","Analyst","Sent","P/E","Grwth","FCF","Mom"],
-                          [30,60,115,85,58,95,72,62,58,58,48,50,48,50]):
-            self.rk_tree.heading(c,text=h); self.rk_tree.column(c,width=w,anchor="e" if c not in ("ticker","name","sector","analyst","stability") else "w")
+        for c,h,w in zip(cols,["#","ISIN","Ticker","Name","Sector","Change","Stability","Predicted","Conv","Analyst","Sent","P/E","Grwth","FCF","Mom"],
+                          [30,100,60,115,85,58,95,72,62,58,58,48,50,48,50]):
+            self.rk_tree.heading(c,text=h); self.rk_tree.column(c,width=w,anchor="e" if c not in ("isin","ticker","name","sector","analyst","stability") else "w")
         self.rk_tree.grid(row=1,column=0,sticky="nsew")
         self.rk_tree.bind("<Double-1>",lambda e:self._stock_popup_from_tree())
         self._rk_tooltip_id=None; self._rk_tooltip_win=None
@@ -795,6 +803,7 @@ class AlphaRanker(ctk.CTk):
             else:
                 self.rk_compare_lbl.configure(text="No per-model IC (single run).",text_color="#71717a")
         self.rk_tree.delete(*self.rk_tree.get_children())
+        imap=get_isin_map()
         for _,r in display_df.iterrows():
             raw_ret=r["predicted_return_pct"]; ret=round(raw_ret,1) if _ok(raw_ret) else None; conf=r.get("confidence",0)
             conv=_conv(conf)
@@ -814,7 +823,7 @@ class AlphaRanker(ctk.CTk):
             if rd_delta is not None and (not isinstance(rd_delta,float) or rd_delta==rd_delta): rd_val=int(rd_delta)
             ch_disp=f"+{rd_val}" if rd_val is not None and rd_val>0 else str(rd_val) if rd_val is not None and rd_val!=0 else "—"
             stab=r.get("movement_classification") or "—"
-            self.rk_tree.insert("","end",values=(int(r["rank"]),r["ticker"],r.get("name","")[:18],
+            self.rk_tree.insert("","end",values=(int(r["rank"]),get_display_id(r["ticker"],imap),r["ticker"],r.get("name","")[:18],
                 r.get("sector","")[:14],ch_disp,stab[:14],rd,conv,an,sn,pe,gr,fcf,mom),tags=(tag,))
 
     def _rk_tooltip_text(self, row_series, col_name):
@@ -850,7 +859,7 @@ class AlphaRanker(ctk.CTk):
             if not hasattr(self,"_rankings_display_df") or self._rankings_display_df is None: return
             vals=self.rk_tree.item(item_id,"values")
             if not vals or col_idx<0 or col_idx>=len(vals): return
-            ticker=vals[1]; cols=("rank","ticker","name","sector","change","stability","return","conviction","analyst","sentiment","pe","growth","fcf","mom")
+            ticker=vals[2]; cols=("rank","isin","ticker","name","sector","change","stability","return","conviction","analyst","sentiment","pe","growth","fcf","mom")
             if col_idx>=len(cols): return
             col_name=cols[col_idx]
             row=self._rankings_display_df[self._rankings_display_df["ticker"]==ticker]
@@ -885,17 +894,20 @@ class AlphaRanker(ctk.CTk):
         sel=self.rk_tree.selection()
         if sel:
             v=self.rk_tree.item(sel[0],"values")
-            if v: self._stock_popup(v[1])
+            # v = (rank, isin, ticker, name, ...); popup needs ticker for API
+            if v and len(v)>2: self._stock_popup(v[2])
 
     def _stock_popup(self,ticker):
         if self.model_results is None: return
         row=self.model_results[self.model_results["ticker"]==ticker]
         if row.empty: return
         r=row.iloc[0]
-        d=ctk.CTkToplevel(self); d.title(ticker); d.geometry("700x550"); d.grab_set(); d.attributes("-topmost",True)
+        disp=get_display_id(ticker)
+        d=ctk.CTkToplevel(self); d.title(disp); d.geometry("700x550"); d.grab_set(); d.attributes("-topmost",True)
         hd=ctk.CTkFrame(d,fg_color="transparent"); hd.pack(fill="x",padx=15,pady=8)
-        ctk.CTkLabel(hd,text=ticker,font=("JetBrains Mono",24,"bold")).pack(side="left")
-        ctk.CTkLabel(hd,text=r.get("name",""),font=("",12),text_color="#a1a1aa").pack(side="left",padx=8)
+        ctk.CTkLabel(hd,text=disp,font=("JetBrains Mono",24,"bold")).pack(side="left")
+        ctk.CTkLabel(hd,text=f"  ({ticker})",font=("",12),text_color="#71717a").pack(side="left")
+        ctk.CTkLabel(hd,text=r.get("name",""),font=("",12),text_color="#a1a1aa").pack(side="left",padx=4)
         pred=r.get("predicted_return_pct",0); pred_ok=pred==pred and pred is not None
         pc="#34d399" if pred_ok and pred>15 else "#fbbf24" if pred_ok and pred>5 else "#a1a1aa"
         ctk.CTkLabel(hd,text=f"+{pred:.1f}%" if pred_ok else "—",font=("JetBrains Mono",20,"bold"),text_color=pc).pack(side="right")
@@ -979,11 +991,11 @@ class AlphaRanker(ctk.CTk):
                       fg_color="#312e81",hover_color="#3730a3",command=self._ai_overlay).pack(side="right",padx=5)
 
         # Row 3: Proposal table (price, units, invested_amount, confidence, alpha_score, holding_period, target, stop_loss, consensus)
-        cols=("src","ticker","name","sector","alpha","conf","price","alloc","shares","horizon","target","stop","consensus","reason")
+        cols=("src","isin","ticker","name","sector","alpha","conf","price","alloc","shares","horizon","target","stop","consensus","reason")
         self.bld_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["Src","Ticker","Name","Sector","Alpha","Conf","Price","Invested","Qty","Horizon","Target","Stop","Consensus","Reason"],
-                          [35,55,100,70,50,40,52,62,36,52,52,52,52,140]):
-            self.bld_tree.heading(c,text=h); self.bld_tree.column(c,width=w,anchor="w" if c in ("name","reason","sector") else "e")
+        for c,h,w in zip(cols,["Src","ISIN","Ticker","Name","Sector","Alpha","Conf","Price","Invested","Qty","Horizon","Target","Stop","Consensus","Reason"],
+                          [35,95,55,100,70,50,40,52,62,36,52,52,52,52,140]):
+            self.bld_tree.heading(c,text=h); self.bld_tree.column(c,width=w,anchor="w" if c in ("isin","name","reason","sector") else "e")
         self.bld_tree.grid(row=3,column=0,sticky="nsew")
         self.bld_tree.tag_configure("etf",foreground="#818cf8")
         self.bld_tree.tag_configure("stock",foreground="#e4e4e7")
@@ -1172,6 +1184,7 @@ class AlphaRanker(ctk.CTk):
     def _show_proposals(self,proposals,budget,fees):
         self.bld_tree.delete(*self.bld_tree.get_children())
         self._build_proposals=proposals
+        imap=get_isin_map()
         total=0; n=len(proposals)
         for p in proposals:
             tk=p.get("ticker",""); alloc=p.get("alloc",p.get("allocation_eur",0))
@@ -1196,7 +1209,7 @@ class AlphaRanker(ctk.CTk):
             consensus=p.get("model_consensus_score"); consensus_str=f"{consensus:.2f}" if consensus is not None and _ok(consensus) else "-"
             src=p.get("src","?")
             tag="etf" if src=="ETF" else "neg" if src=="SELL" else "ai" if src=="AI" else "stock"
-            self.bld_tree.insert("","end",values=(src,tk,p.get("name","")[:22],
+            self.bld_tree.insert("","end",values=(src,get_display_id(tk,imap),tk,p.get("name","")[:22],
                 p.get("sector","")[:14],alpha,conf_str,price_str,f"{alloc:,.0f}",shares,horizon_str,target_str,stop_str,consensus_str,
                 p.get("reason","")[:40]),tags=(tag,))
         self.bld_summary.configure(
@@ -1248,13 +1261,13 @@ class AlphaRanker(ctk.CTk):
         remaining=[]
         for item in self.bld_tree.get_children():
             vals=self.bld_tree.item(item,"values")
-            # cols: src,ticker,name,sector,alpha,conf,price,alloc,shares,horizon,target,stop,consensus,reason
-            try: alloc=int(float(str(vals[7]).replace(",","")))
+            # cols: src,isin,ticker,name,sector,alpha,conf,price,alloc,shares,horizon,target,stop,consensus,reason
+            try: alloc=int(float(str(vals[8]).replace(",","")))
             except: alloc=0
-            try: shares=int(vals[8])
+            try: shares=int(vals[9])
             except: shares=0
-            remaining.append({"src":vals[0],"ticker":vals[1],"name":vals[2],"sector":vals[3],
-                             "alpha_score":vals[4],"alloc":alloc,"shares":shares,"reason":vals[13]})
+            remaining.append({"src":vals[0],"ticker":vals[2],"name":vals[3],"sector":vals[4],
+                             "alpha_score":vals[5],"alloc":alloc,"shares":shares,"reason":vals[14]})
         self._build_proposals=remaining
 
     # ── PROJECTIONS TAB ───────────────────────────────────────
@@ -1263,11 +1276,11 @@ class AlphaRanker(ctk.CTk):
         top=ctk.CTkFrame(tab,fg_color="transparent"); top.grid(row=0,column=0,sticky="ew",pady=(0,6))
         ctk.CTkLabel(top,text="Forward Price Projections",font=("",14,"bold")).pack(side="left")
         ctk.CTkButton(top,text="Refresh",width=90,height=28,font=("",10),command=self._upd_proj).pack(side="right")
-        cols=("ticker","name","price","units","val","3m","6m","12m","24m","10y","ret")
+        cols=("isin","ticker","name","price","units","val","3m","6m","12m","24m","10y","ret")
         self.prj_tree=ttk.Treeview(tab,columns=cols,show="headings",style="T.Treeview")
-        for c,h,w in zip(cols,["Ticker","Name","Price","Qty","Value","3M","6M","12M","24M","10Y","Model ret"],
-                          [60,120,65,42,70,68,68,72,72,72,68]):
-            self.prj_tree.heading(c,text=h); self.prj_tree.column(c,width=w,anchor="e" if c not in ("ticker","name") else "w")
+        for c,h,w in zip(cols,["ISIN","Ticker","Name","Price","Qty","Value","3M","6M","12M","24M","10Y","Model ret"],
+                          [95,60,120,65,42,70,68,68,72,72,72,68]):
+            self.prj_tree.heading(c,text=h); self.prj_tree.column(c,width=w,anchor="e" if c not in ("isin","ticker","name") else "w")
         self.prj_tree.grid(row=1,column=0,sticky="nsew")
         self.prj_tree.tag_configure("bull",foreground="#34d399"); self.prj_tree.tag_configure("bear",foreground="#f87171"); self.prj_tree.tag_configure("flat",foreground="#fbbf24")
         self.prj_lbl=ctk.CTkLabel(tab,text="Run model first.",font=("JetBrains Mono",11),text_color="#71717a")
@@ -1278,6 +1291,7 @@ class AlphaRanker(ctk.CTk):
             self.prj_lbl.configure(text="Run model first."); return
         projs=model.project_portfolio_prices(self._portfolio_pnl,self.model_results,model_info=self.model_info)
         self.prj_tree.delete(*self.prj_tree.get_children())
+        imap=get_isin_map()
         tn=t12=0
         H = 12
         if isinstance(self.model_info, dict) and self.model_info.get("prediction_horizon_months") is not None:
@@ -1289,7 +1303,7 @@ class AlphaRanker(ctk.CTk):
             ar=p.get("annual_return",0); tag="bull" if ar>0.1 else "bear" if ar<0 else "flat"
             cu="\u20ac" if p["currency"]=="EUR" else "$" if p["currency"]=="USD" else "\u00a3"
             v=p["current_price"]*p["units"]; tn+=v; t12+=h12.get("value",v)
-            self.prj_tree.insert("","end",values=(p["ticker"],p["name"][:20],f"{p['current_price']}{cu}",p["units"],f"{v:,.0f}{cu}",
+            self.prj_tree.insert("","end",values=(get_display_id(p["ticker"],imap),p["ticker"],p["name"][:20],f"{p['current_price']}{cu}",p["units"],f"{v:,.0f}{cu}",
                 f"{h3.get('price','?')}{cu} ({h3.get('gain_pct',0):+.1f}%)",f"{h6.get('price','?')}{cu} ({h6.get('gain_pct',0):+.1f}%)",
                 f"{h12.get('price','?')}{cu} ({h12.get('gain_pct',0):+.1f}%)",f"{h24.get('price','?')}{cu} ({h24.get('gain_pct',0):+.1f}%)",
                 f"{h10y.get('price','?')}{cu} ({h10y.get('gain_pct',0):+.1f}%)",f"{ar*100:+.1f}%"),tags=(tag,))
@@ -1413,7 +1427,7 @@ class AlphaRanker(ctk.CTk):
         left=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8,width=220); left.grid(row=1,column=0,sticky="nsew",padx=(0,4),pady=0)
         left.grid_propagate(False)
         left.grid_rowconfigure(1,weight=1); left.grid_columnconfigure(0,weight=1)
-        ctk.CTkLabel(left,text="Ticker",font=("",10,"bold"),text_color="#a1a1aa").grid(row=0,column=0,sticky="ew",padx=6,pady=4)
+        ctk.CTkLabel(left,text="ISIN / Ticker",font=("",10,"bold"),text_color="#a1a1aa").grid(row=0,column=0,sticky="ew",padx=6,pady=4)
         self._universe_tree=None
         self._universe_tree, self._universe_sb = self._universe_build_list(left)
         self._universe_tree.grid(row=1,column=0,sticky="nsew",padx=4,pady=(0,4))
@@ -1421,13 +1435,14 @@ class AlphaRanker(ctk.CTk):
         # Right: chart area
         self._universe_chart=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8); self._universe_chart.grid(row=1,column=1,sticky="nsew",padx=4,pady=0)
         self._universe_chart.grid_columnconfigure(0,weight=1); self._universe_chart.grid_rowconfigure(0,weight=1)
-        ctk.CTkLabel(self._universe_chart,text="Cliquez sur un ticker pour afficher l'historique des prix",
+        ctk.CTkLabel(self._universe_chart,text="Cliquez sur un titre (ISIN/Ticker) pour afficher l'historique des prix",
                      text_color="#52525b",font=("",11)).pack(pady=40)
         self._universe_fill_tickers()
 
     def _universe_build_list(self,parent):
-        t=ttk.Treeview(parent,columns=("ticker",),show="headings",height=24,selectmode="browse",style="T.Treeview")
-        t.heading("ticker",text="Symbole"); t.column("ticker",width=180,minwidth=100)
+        t=ttk.Treeview(parent,columns=("isin","ticker"),show="headings",height=24,selectmode="browse",style="T.Treeview")
+        t.heading("isin",text="ISIN"); t.column("isin",width=100,minwidth=80)
+        t.heading("ticker",text="Ticker"); t.column("ticker",width=80,minwidth=60)
         t.bind("<<TreeviewSelect>>",self._universe_on_select)
         sb=ttk.Scrollbar(parent,orient="vertical",command=t.yview)
         t.configure(yscrollcommand=sb.set)
@@ -1445,8 +1460,9 @@ class AlphaRanker(ctk.CTk):
         except Exception:
             tickers=[]; self._universe_count_lbl.configure(text="")
         for c in self._universe_tree.get_children(""): self._universe_tree.delete(c)
-        for t in sorted(tickers):
-            self._universe_tree.insert("","end",values=(t,))
+        imap=get_isin_map()
+        for sym in sorted(tickers):
+            self._universe_tree.insert("","end",values=(get_display_id(sym,imap),sym))
 
     def _universe_refresh(self):
         self._universe_fill_tickers()
@@ -1455,7 +1471,8 @@ class AlphaRanker(ctk.CTk):
         sel=self._universe_tree.selection()
         if not sel: return
         item=self._universe_tree.item(sel[0]); v=item.get("values")
-        ticker=v[0] if v else None
+        # v = (isin, ticker); yfinance uses ticker
+        ticker=v[1] if v and len(v)>1 else (v[0] if v else None)
         if not ticker: return
         for w in self._universe_chart.winfo_children(): w.destroy()
         ctk.CTkLabel(self._universe_chart,text=f"Chargement de {ticker}…",text_color="#71717a",font=("",11)).pack(pady=30)

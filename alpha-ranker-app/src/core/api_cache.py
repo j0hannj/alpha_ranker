@@ -141,6 +141,34 @@ def set_stored_universe_list(tickers):
     set("universe_list", "securities", {"tickers": list(tickers), "updated": datetime.now().isoformat()})
 
 
+def get_isin_map():
+    """Dictionnaire ticker -> ISIN (affichage). Vide si pas encore enrichi."""
+    try:
+        raw = get("universe_list", "isin_map", max_age_hours=24 * 365 * 50)
+        if isinstance(raw, dict):
+            return raw
+        return {}
+    except Exception:
+        return {}
+
+
+def set_isin_map(ticker_to_isin):
+    """Enregistre ou fusionne le mapping ticker -> ISIN (persistant)."""
+    try:
+        existing = get_isin_map()
+        existing.update(ticker_to_isin)
+        set("universe_list", "isin_map", existing)
+    except Exception:
+        pass
+
+
+def get_display_id(ticker, isin_map=None):
+    """Pour l'affichage: ISIN si connu, sinon ticker."""
+    if isin_map is None:
+        isin_map = get_isin_map()
+    return isin_map.get(ticker) or ticker
+
+
 def clear_older_than_days(days: int = 30, exclude_sources=None):
     """Remove cache entries older than `days`. Never touch exclude_sources (e.g. prices_yearly, universe_list)."""
     if exclude_sources is None:

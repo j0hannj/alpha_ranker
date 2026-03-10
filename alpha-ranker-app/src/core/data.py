@@ -162,6 +162,12 @@ def fetch_universe(years=5, callback=None):
     set_stored_universe_list(tickers)
     if callback and stored:
         callback(f"Data: univers {len(tickers)} (dont {len(stored)} déjà en base, conservés)")
+    fmp_key = os.environ.get("FMP_API_KEY")
+    if fmp_key and tickers and callback:
+        try:
+            fetch_isins_fmp(tickers, fmp_key, callback=callback)
+        except Exception:
+            pass
     fundamentals = {}
     for i, t in enumerate(tickers):
         cached_info = cache_get("yahoo_info", t, max_age_hours=24)
@@ -267,6 +273,36 @@ def fetch_prices(tickers):
         if r["price"] is not None:
             prices[t] = r
     return prices
+
+# ── ISIN (FMP profile, pour affichage) ─────────────────────────
+def fetch_isins_fmp(tickers, api_key, callback=None, chunk_size=50):
+    """
+    Récupère les ISIN via FMP company profile. Met à jour le cache isin_map (ticker -> isin).
+    Les ISIN restent en DB même si l'API ne les renvoie plus ensuite.
+    """
+    from .api_cache import get_isin_map, set_isin_map
+    if not api_key or not tickers:
+        return {}
+    out = dict(get_isin_map())
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i : i + chunk_size]
+        syms = ",".join(chunk)
+        try:
+            url = f"https://financialmodelingprep.com/api/v3/profile/{syms}?apikey={api_key}"
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = json.loads(r.read().decode())
+            for item in (data or []):
+                sym = (item.get("symbol") or "").strip()
+                isin = (item.get("isin") or "").strip()
+                if sym and isin and len(isin) >= 10:
+                    out[sym] = isin
+            if callback and (i + chunk_size) % 200 == 0:
+                callback(f"Data: ISIN {min(i + chunk_size, len(tickers))}/{len(tickers)}")
+        except Exception:
+            pass
+    set_isin_map(out)
+    return out
+
 
 # ── FUNDAMENTALS (FMP) ────────────────────────────────────────
 def fetch_fundamentals(ticker, api_key=None):
