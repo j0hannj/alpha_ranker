@@ -712,9 +712,9 @@ class AlphaRanker(ctk.CTk):
         self.rk_history_frame.grid(row=4,column=0,sticky="ew",padx=10,pady=(4,0))
         self.rk_history_frame.grid_columnconfigure(0,weight=1)
         ctk.CTkLabel(self.rk_history_frame,text="Run history (IC, hit rate, long-short):",font=("",10,"bold"),text_color="#a1a1aa").grid(row=0,column=0,sticky="w")
-        self.rk_history_tree=ttk.Treeview(self.rk_history_frame,columns=("date","mode","ic","ic_ir","hit","ls"),show="headings",height=6,style="T.Treeview")
-        for col,head in [("date","Date"),("mode","Mode"),("ic","IC"),("ic_ir","IC IR"),("hit","Hit%"),("ls","L-S ret")]:
-            self.rk_history_tree.heading(col,text=head); self.rk_history_tree.column(col,width=72 if col!="date" else 100)
+        self.rk_history_tree=ttk.Treeview(self.rk_history_frame,columns=("date","mode","stocks","feat","ic","ic_ir","hit","ls","horizon"),show="headings",height=6,style="T.Treeview")
+        for col,head,w in [("date","Date",100),("mode","Mode",72),("stocks","Stocks",48),("feat","Feat",40),("ic","IC",52),("ic_ir","IC IR",52),("hit","Hit%",48),("ls","L-S ret",58),("horizon","Hz",40)]:
+            self.rk_history_tree.heading(col,text=head); self.rk_history_tree.column(col,width=w)
         self.rk_history_tree.grid(row=1,column=0,sticky="ew",pady=(2,0))
 
     def _refresh_data_updated_label(self):
@@ -832,7 +832,12 @@ class AlphaRanker(ctk.CTk):
             verdict,color,msg=model.assess_model_health(self.model_info)
             ic=self.model_info.get("mean_ic"); hr=self.model_info.get("hit_rate"); icir=self.model_info.get("ic_ir")
             def _num(x): return x is not None and (not isinstance(x,float) or x==x)
-            summary="Mean IC: "+f"{ic:.3f}" if _num(ic) else "Mean IC: —"
+            n_stk=self.model_info.get("n_stocks"); n_ft=self.model_info.get("n_features")
+            summary=""
+            if n_stk: summary+=f"Stocks: {n_stk}"
+            if n_ft: summary+=f" | Feat: {n_ft}" if summary else f"Feat: {n_ft}"
+            summary+=" | " if summary else ""
+            summary+= f"Mean IC: {ic:.3f}" if _num(ic) else "Mean IC: —"
             if _num(hr): summary+=f" | Hit rate: {hr*100:.0f}%"
             if _num(icir): summary+=f" | ICIR: {icir:.2f}"
             self.rk_health_lbl.configure(text=f"[{verdict}] {summary} — {msg}",text_color=color)
@@ -851,11 +856,14 @@ class AlphaRanker(ctk.CTk):
                 for r in portfolio.get_model_run_history(15):
                     ts=r.get("run_timestamp") or "—"
                     mode=(r.get("mode") or "—")[:12]
+                    ns=r.get("n_stocks"); ns_s=str(ns) if ns is not None else "—"
+                    nf=r.get("n_features"); nf_s=str(nf) if nf is not None else "—"
                     ic=r.get("mean_ic"); ic_s=f"{ic:.3f}" if ic is not None and ic==ic else "—"
                     icir=r.get("ic_ir"); icir_s=f"{icir:.2f}" if icir is not None and icir==icir else "—"
                     hr=r.get("hit_rate"); hr_s=f"{100*(hr or 0):.0f}%" if hr is not None and hr==hr else "—"
                     ls=r.get("mean_ls_return"); ls_s=f"{100*(ls or 0):.1f}%" if ls is not None and ls==ls else "—"
-                    self.rk_history_tree.insert("","end",values=(ts,mode,ic_s,icir_s,hr_s,ls_s))
+                    hz=r.get("prediction_horizon_months"); hz_s=f"{hz}M" if hz is not None else "—"
+                    self.rk_history_tree.insert("","end",values=(ts,mode,ns_s,nf_s,ic_s,icir_s,hr_s,ls_s,hz_s))
             except Exception as e:
                 logger.debug("_upd_rankings: model run history failed: %s", e)
         self.rk_tree.delete(*self.rk_tree.get_children())

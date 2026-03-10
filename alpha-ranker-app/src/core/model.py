@@ -758,7 +758,8 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
             feat_cols = all_num_cols
     else:
         feat_cols = all_num_cols
-    if callback: callback(f"{len(full_df)} obs, {len(feat_cols)} features, {full_df['period_idx'].nunique()} periods")
+    n_unique_tickers = full_df["ticker"].nunique()
+    if callback: callback(f"{len(full_df)} obs, {n_unique_tickers} tickers, {len(feat_cols)} features, {full_df['period_idx'].nunique()} periods")
 
     model_names = config.get("enabled_models") or list(_get_models(config).keys())
     period_indices = sorted(full_df["period_idx"].unique())
@@ -843,6 +844,7 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
             g=g.sort_values("predicted",ascending=False); n=max(len(g)//5,2)
             ls_ret.append(g.head(n)["actual"].mean()-g.tail(n)["actual"].mean())
         oos_metrics = {"n_predictions":len(oos_df),"n_periods":int(oos_df["period"].nunique()),
+            "n_stocks": n_unique_tickers, "n_obs": len(full_df),
             "pearson_correlation":round(corr,4),"spearman_rank_corr":round(rc,4),
             "mean_ic":round(ic_per.mean(),4),"ic_std":round(ic_per.std(),4),
             "ic_ir":round(ic_per.mean()/ic_per.std(),4) if ic_per.std()>0 else 0,
@@ -852,7 +854,7 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
             "ic_series":[round(float(v),4) for v in ic_per.values],
             "per_model_ic":{n:round(np.mean(v),4) for n,v in per_model_oos.items() if v}}
     else:
-        oos_metrics = {"n_predictions":0,"per_model_ic":{},"mean_ic":0,"ic_std":0,"ic_ir":0,"hit_rate":0,"spearman_rank_corr":0,"mean_ls_return":0}
+        oos_metrics = {"n_predictions":0,"n_stocks":0,"n_obs":0,"per_model_ic":{},"mean_ic":0,"ic_std":0,"ic_ir":0,"hit_rate":0,"spearman_rank_corr":0,"mean_ls_return":0}
     mean_ls = oos_metrics.get("mean_ls_return", 0)
     if mean_ls is None or float(mean_ls) == 0:
         n_pred = oos_metrics.get("n_predictions", 0)
@@ -1891,7 +1893,7 @@ def run_full_pipeline(callback=None):
         feat_imp = primary["feat_imp"]
         oos_metrics = primary["oos_metrics"]
         n_f = len(primary["feat_imp"]) if isinstance(primary["feat_imp"], (list, dict)) else 0
-        model_info = {"mode":"walk_forward_ensemble","n_features":n_f,"blend":primary["blend"],
+        model_info = {"mode":"walk_forward_ensemble","n_features":n_f,"n_stocks":oos_metrics.get("n_stocks",0),"blend":primary["blend"],
                       "prediction_horizon_months": primary_H,"horizons_trained": list(all_horizon_results.keys()),"primary_horizon": primary_H,
                       "per_horizon_metrics": {H: d["oos_metrics"] for H,d in all_horizon_results.items()}, **oos_metrics}
         if used_yahoo_fallback:
