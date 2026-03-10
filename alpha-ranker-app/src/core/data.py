@@ -1356,27 +1356,34 @@ def fetch_all_data(tickers=None, years=5, callback=None):
         from . import portfolio as _pf
 
         rows = []
-        if isinstance(prices.columns, pd.MultiIndex):
-            # Forme standard de yf.download: colonnes = (ticker, field)
+        if prices is not None and isinstance(prices.columns, pd.MultiIndex):
             for t in universe_tickers:
-                if (t, "Close") not in prices.columns:
-                    continue
-                df_t = prices[t].reset_index()  # colonnes Date, Open, High, Low, Close, Volume
-                for _, r in df_t.iterrows():
-                    d = r["Date"]
-                    rows.append(
-                        {
-                            "ticker": t,
-                            "date": d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d),
-                            "open": float(r.get("Open")) if pd.notna(r.get("Open")) else None,
-                            "high": float(r.get("High")) if pd.notna(r.get("High")) else None,
-                            "low": float(r.get("Low")) if pd.notna(r.get("Low")) else None,
-                            "close": float(r.get("Close")) if pd.notna(r.get("Close")) else None,
-                            "volume": float(r.get("Volume")) if pd.notna(r.get("Volume")) else None,
-                            "currency": None,
-                            "source": "yahoo",
-                        }
-                    )
+                try:
+                    if (t, "Close") not in prices.columns:
+                        continue
+                    block = prices[t]
+                    if block is None:
+                        continue
+                    df_t = block.reset_index()
+                    for _, r in df_t.iterrows():
+                        d = r.get("Date")
+                        if d is None:
+                            continue
+                        rows.append(
+                            {
+                                "ticker": t,
+                                "date": d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d),
+                                "open": float(r.get("Open")) if pd.notna(r.get("Open")) else None,
+                                "high": float(r.get("High")) if pd.notna(r.get("High")) else None,
+                                "low": float(r.get("Low")) if pd.notna(r.get("Low")) else None,
+                                "close": float(r.get("Close")) if pd.notna(r.get("Close")) else None,
+                                "volume": float(r.get("Volume")) if pd.notna(r.get("Volume")) else None,
+                                "currency": None,
+                                "source": "yahoo",
+                            }
+                        )
+                except Exception as e:
+                    logger.warning("fetch_all_data: skip ticker %s for prices table: %s", t, e)
         if rows:
             _pf.upsert_prices(rows)
     except Exception as e:
