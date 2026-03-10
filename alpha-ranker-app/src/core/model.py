@@ -755,16 +755,23 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
     if callback: callback(f"{len(full_df)} obs, {len(feat_cols)} features, {full_df['period_idx'].nunique()} periods")
 
     model_names = config.get("enabled_models") or list(_get_models(config).keys())
-    period_indices = sorted(full_df["period_idx"].unique()); min_train=8
+    period_indices = sorted(full_df["period_idx"].unique())
+    # Adaptive min_train: need at least 1 train period and 1 test; cap at 8 so we don't overfit with too few OOS folds
+    min_train = max(1, min(8, len(period_indices) - 1)) if len(period_indices) >= 2 else 0
     oos_preds=[]; per_model_oos = {n:[] for n in model_names}
     ensemble_method = config.get("ensemble_method") or "ic_weighted_average"
     winsorize = config.get("winsorization", False)
     winsorize_q = config.get("winsorize_quantile", 0.02)
+    min_trn = 50
+    min_tst = 10
+    n_periods = len(period_indices)
+    if n_periods <= 4:
+        min_trn, min_tst = 20, 5
     for i,tp in enumerate(period_indices):
         if i<min_train: continue
         trn = full_df[full_df["period_idx"].isin(period_indices[:i])]
         tst = full_df[full_df["period_idx"]==tp]
-        if len(trn)<50 or len(tst)<10: continue
+        if len(trn)<min_trn or len(tst)<min_tst: continue
         Xtr,ytr = trn[feat_cols].copy(), trn["forward_return"].copy()
         Xte,yte = tst[feat_cols].copy(), tst["forward_return"].copy()
         med = Xtr.median()
