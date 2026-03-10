@@ -37,15 +37,27 @@ def set_global_seed(seed=None):
         pass
 
 # New modular imports (refactored architecture)
-from features.fundamental_features import get_fundamentals_asof, build_features_asof
-from features.price_features import compute_forward_return
-from features.cross_sectional import (
-    rank_features,
-    sector_neutralize,
-    factor_neutralize_scores,
-    add_sector_interactions,
-    decorrelate_features,
-)
+try:
+    from .features.fundamental_features import get_fundamentals_asof, build_features_asof
+    from .features.price_features import compute_forward_return
+    from .features.cross_sectional import (
+        rank_features,
+        sector_neutralize,
+        factor_neutralize_scores,
+        add_sector_interactions,
+        decorrelate_features,
+    )
+except Exception:
+    # Fallback when core is imported without package context
+    from features.fundamental_features import get_fundamentals_asof, build_features_asof
+    from features.price_features import compute_forward_return
+    from features.cross_sectional import (
+        rank_features,
+        sector_neutralize,
+        factor_neutralize_scores,
+        add_sector_interactions,
+        decorrelate_features,
+    )
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore")
@@ -64,7 +76,9 @@ def fetch_fmp_quarterly(ticker, api_key, limit=40):
         try:
             url = f"https://financialmodelingprep.com/api/v3/{ep}/{ticker}?period=quarter&limit={limit}&apikey={api_key}"
             with urllib.request.urlopen(url,timeout=15) as r: raw[name] = json.loads(r.read().decode())
-        except: raw[name] = []
+        except Exception as e:
+            logger.warning("fetch_fmp_quarterly: request failed for %s [%s]: %s", ticker, ep, e)
+            raw[name] = []
     by_date = {}
     for item in raw.get("income",[]):
         d = item.get("filingDate") or item.get("date")
@@ -95,12 +109,17 @@ def fetch_all_fundamentals(tickers, api_key, callback=None):
     try:
         from .api_cache import get as cache_get, set as cache_set
         for t in tickers:
-            cached = cache_get("fmp_fund", t, max_age_hours=7*24)
+            try:
+                cached = cache_get("fmp_fund", t, max_age_hours=7*24)
+            except Exception as e:
+                logger.warning("fetch_all_fundamentals: cache get failed for %s: %s", t, e)
+                cached = None
             if cached and isinstance(cached, list) and len(cached) > 0:
                 data[t] = cached
             else:
                 to_fetch.append(t)
-    except Exception:
+    except Exception as e:
+        logger.warning("fetch_all_fundamentals: api_cache unavailable, will refetch all: %s", e)
         to_fetch = list(tickers)
     if not to_fetch and data:
         if callback: callback(f"FMP cache (SQLite): {len(data)} tickers (no request)")
@@ -114,8 +133,8 @@ def fetch_all_fundamentals(tickers, api_key, callback=None):
                 if not to_fetch and len(data) > 50:
                     if callback: callback(f"FMP cache (file): {len(data)} tickers")
                     return data
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("fetch_all_fundamentals: FUNDAMENTALS_CACHE read failed: %s", e)
     if to_fetch and callback:
         callback(f"FMP: fetching {len(to_fetch)}/{len(tickers)} tickers (rest from cache)...")
     for i, t in enumerate(to_fetch):
@@ -127,16 +146,16 @@ def fetch_all_fundamentals(tickers, api_key, callback=None):
                 data[t] = rows
                 try:
                     cache_set("fmp_fund", t, rows)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as e:
+                    logger.warning("fetch_all_fundamentals: cache set failed for %s: %s", t, e)
+        except Exception as e:
+            logger.warning("fetch_all_fundamentals: fetch failed for %s: %s", t, e)
     if data:
         try:
             payload = {**data, "_date": datetime.now().isoformat()}
             FUNDAMENTALS_CACHE.write_text(json.dumps(payload, default=str), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("fetch_all_fundamentals: FUNDAMENTALS_CACHE write failed: %s", e)
     if callback: callback(f"FMP: {len(data)} tickers loaded")
     return data
 
@@ -670,7 +689,12 @@ def predict_current(models_dict, medians, feat_cols, prices, fundamentals_db,
     c_norm = (cr - cr.min()) / (cr.max() - cr.min() + 1e-9)
     df["reliability_score"] = (0.4 * a_norm + 0.3 * c_norm + 0.3 * df["model_agreement_score"]).round(3)
     df["reliability_score"] = df["reliability_score"].fillna(0.0)
-    assert df["predicted_return_pct"].isna().sum() == 0, f"NaN in predicted_return_pct: {df['predicted_return_pct'].isna().sum()}"
+    nan_count = df["predicted_return_pct"].isna().sum()
+    if nan_count > 0:
+        logger.warning(
+            "predict_current: %d NaN in predicted_return_pct, filling with 0", nan_count
+        )
+        df["predicted_return_pct"] = df["predicted_return_pct"].fillna(0.0)
 
     # Rename for display compatibility
     for col in ["pe_ratio","peg_ratio","revenue_growth_yoy","gross_margin","net_margin",
@@ -967,105 +991,313 @@ def project_portfolio_prices(holdings_pnl, model_results, horizons=None, model_i
 # SIMPLE MODE (no FMP)
 # ══════════════════════════════════════════════════════════════
 def train_simple(prices, yf_fundamentals, macro, callback=None, sentiment_scores=None):
-    """Degraded mode: technical + sentiment features, ensemble, rank+neutralize."""
+    """Simple mode: technical + sentiment features, walk-forward with FORWARD returns (no FMP)."""
     try:
         from core.engine_config import get_model_settings
         cfg = get_model_settings()
         if cfg and cfg.get("deterministic_mode", False):
             set_global_seed(cfg.get("global_seed", GLOBAL_SEED))
-    except Exception:
-        pass
-    if callback: callback("Simple ensemble: technical + sentiment...")
-    records = []
+    except Exception as e:
+        logger.warning("train_simple: get_model_settings failed: %s", e)
+
+    if callback:
+        callback("Simple ensemble: technical + sentiment (forward targets)...")
     logger.info("train_simple: start (full universe=%d tickers)", len(yf_fundamentals))
-    for ticker,fund in yf_fundamentals.items():
-        row = {"ticker":ticker,"name":fund.get("shortName",ticker),"sector":fund.get("sector","Unknown")}
+
+    if prices is None or not hasattr(prices, "index") or len(prices.index) == 0:
+        logger.warning("train_simple: no price data available")
+        return None, None, None, None, None, None
+
+    horizon_months = 12
+    horizon_days = horizon_months * 21  # ~252 trading sessions
+
+    # 1) Tickers avec au moins 2 ans de prix
+    valid_tickers = []
+    for ticker in yf_fundamentals:
         try:
-            if isinstance(prices.columns,pd.MultiIndex): close=prices[(ticker,"Close")].dropna()
-            else: continue
-            if len(close)<252: continue
-            row["momentum_12_1"]=close.iloc[-21]/close.iloc[-252]-1
-            row["return_1m"]=close.pct_change(21).iloc[-1]
-            row["return_3m"]=close.pct_change(63).iloc[-1]
-            row["return_6m"]=close.pct_change(126).iloc[-1]
-            daily=close.pct_change().dropna()
-            row["volatility_3m"]=daily.tail(63).std()*np.sqrt(252)
-            row["volatility_12m"]=daily.tail(252).std()*np.sqrt(252)
-            row["price_vs_ma50"]=close.iloc[-1]/close.tail(50).mean()-1
-            row["price_vs_ma200"]=close.iloc[-1]/close.tail(200).mean()-1
-            row["drawdown_from_high"]=close.iloc[-1]/close.tail(252).max()-1
-            row["target_12m"]=close.iloc[-1]/close.iloc[-252]-1
-            if sentiment_scores: row["news_sentiment"]=sentiment_scores.get(ticker,0.0)
-            sec=fund.get("sector","")
-            row["macro_fed"]=macro.get("fed_funds_rate",4)
-            row["macro_oil"]=macro.get("oil_price",80)
-            row["macro_vix"]=macro.get("vix",22)
-            row["tech_x_rates"]=(1 if sec in ["Technology","Communication Services"] else 0)*row["macro_fed"]
-            row["energy_x_oil"]=(1 if sec=="Energy" else 0)*row["macro_oil"]
-            if sentiment_scores:
-                s=sentiment_scores.get(ticker,0.0)
-                row["sentiment_x_momentum"]=s*row.get("momentum_12_1",0)
-            records.append(row)
+            if isinstance(prices.columns, pd.MultiIndex):
+                close = prices[(ticker, "Close")].dropna()
+            else:
+                continue
+            if len(close) >= 504:
+                valid_tickers.append(ticker)
         except Exception as e:
-            logger.warning("train_simple: row build for %s failed: %s", ticker, e)
-    df = pd.DataFrame(records)
-    if len(df)<30:
-        logger.warning("train_simple: abort (only %d rows, need >=30)", len(df))
-        return None,None,None,None,None,None
-    meta=["ticker","name","sector","target_12m"]
-    fcols=[c for c in df.columns if c not in meta and df[c].dtype in [np.float64,np.int64,float,int]]
-    X=df[fcols].copy(); y=df["target_12m"].copy()
-    medians=X.median()
-    X=X.fillna(medians).replace([np.inf,-np.inf],np.nan).fillna(medians)
-    # Rank transform + sector neutralize
-    X = rank_features(X, fcols)
-    X_neut = X.copy(); X_neut["sector"]=df["sector"].values
-    X_neut = sector_neutralize(X_neut,fcols,"sector")
-    X = X_neut.drop(columns=["sector"],errors="ignore")
-    # Sklearn Ridge/ElasticNet do not accept NaN: ensure matrix is finite
-    X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    if X.isna().any().any() or np.isinf(X.to_numpy()).any():
-        logger.warning("train_simple: non-finite values remain after clean (dropped to 0)")
-    if callback: callback("Training ensemble (simple mode)...")
-    logger.info("train_simple: universe=%d → %d rows (≥252d), %d features", len(yf_fundamentals), X.shape[0], X.shape[1])
+            logger.debug("train_simple: price check failed for %s: %s", ticker, e)
+    if callback:
+        callback(f"  {len(valid_tickers)} tickers with ≥2y of prices")
+
+    all_dates = prices.index.tolist()
+    if len(all_dates) <= horizon_days:
+        logger.warning("train_simple: not enough history for forward horizon")
+        return None, None, None, None, None, None
+
+    # Dates de rebalancement (tous les ~3 mois, en s'arrêtant horizon_days avant la fin)
+    rebal_dates = []
+    for i in range(0, len(all_dates) - horizon_days, 63):
+        rebal_dates.append(all_dates[i])
+    if len(rebal_dates) < 4:
+        if callback:
+            callback("Not enough rebalancing dates for walk-forward")
+        return None, None, None, None, None, None
+
+    # 2) Construire les features et FORWARD returns sur plusieurs périodes
+    all_records = []
+    for rd_idx, rd in enumerate(rebal_dates):
+        if callback and rd_idx % 4 == 0:
+            callback(f"  Building features: period {rd_idx+1}/{len(rebal_dates)}")
+        for ticker in valid_tickers:
+            try:
+                if not isinstance(prices.columns, pd.MultiIndex):
+                    continue
+                close = prices[(ticker, "Close")].dropna()
+                # Jusqu'à la date rd
+                close_to_rd = close[close.index <= rd]
+                if len(close_to_rd) < 252:
+                    continue
+
+                fund = yf_fundamentals.get(ticker, {})
+                row = {
+                    "ticker": ticker,
+                    "name": fund.get("shortName", ticker),
+                    "sector": fund.get("sector", "Unknown"),
+                    "period_idx": rd_idx,
+                }
+
+                c = close_to_rd
+                row["momentum_12_1"] = c.iloc[-21] / c.iloc[-252] - 1
+                row["return_1m"] = c.pct_change(21).iloc[-1]
+                row["return_3m"] = c.pct_change(63).iloc[-1]
+                row["return_6m"] = c.pct_change(126).iloc[-1]
+                daily = c.pct_change().dropna()
+                row["volatility_3m"] = daily.tail(63).std() * np.sqrt(252)
+                row["volatility_12m"] = daily.tail(252).std() * np.sqrt(252)
+                row["price_vs_ma50"] = c.iloc[-1] / c.tail(50).mean() - 1
+                row["price_vs_ma200"] = c.iloc[-1] / c.tail(200).mean() - 1
+                row["drawdown_from_high"] = c.iloc[-1] / c.tail(252).max() - 1
+
+                if sentiment_scores:
+                    row["news_sentiment"] = sentiment_scores.get(ticker, 0.0)
+
+                sec = fund.get("sector", "")
+                row["macro_fed"] = macro.get("fed_funds_rate", 4)
+                row["macro_oil"] = macro.get("oil_price", 80)
+                row["macro_vix"] = macro.get("vix", 22)
+                row["tech_x_rates"] = (1 if sec in ["Technology", "Communication Services"] else 0) * row["macro_fed"]
+                row["energy_x_oil"] = (1 if sec == "Energy" else 0) * row["macro_oil"]
+                if sentiment_scores:
+                    s = sentiment_scores.get(ticker, 0.0)
+                    row["sentiment_x_momentum"] = s * row.get("momentum_12_1", 0)
+
+                # Target: FORWARD return à partir de rd
+                close_after_rd = close[close.index > rd]
+                if len(close_after_rd) < horizon_days:
+                    continue
+                future_price = close_after_rd.iloc[min(horizon_days - 1, len(close_after_rd) - 1)]
+                current_price = c.iloc[-1]
+                if current_price <= 0:
+                    continue
+                row["forward_return"] = future_price / current_price - 1
+                all_records.append(row)
+            except Exception as e:
+                logger.debug("train_simple: %s at period %d failed: %s", ticker, rd_idx, e)
+
+    df = pd.DataFrame(all_records)
+    if len(df) < 50:
+        logger.warning("train_simple: abort (only %d rows, need ≥50)", len(df))
+        return None, None, None, None, None, None
+
+    if callback:
+        callback(f"  {len(df)} observations across {df['period_idx'].nunique()} periods")
+
+    meta = ["ticker", "name", "sector", "forward_return", "period_idx"]
+    fcols = [c for c in df.columns if c not in meta and df[c].dtype in [np.float64, np.int64, float, int]]
+
+    period_indices = sorted(df["period_idx"].unique())
+    min_train = max(4, len(period_indices) // 3)
+
+    oos_preds = []
+    per_model_oos = {}
+
+    # 3) Walk-forward OOS
+    for i, tp in enumerate(period_indices):
+        if i < min_train:
+            continue
+        trn = df[df["period_idx"].isin(period_indices[:i])]
+        tst = df[df["period_idx"] == tp]
+        if len(trn) < 30 or len(tst) < 5:
+            continue
+
+        Xtr = trn[fcols].copy()
+        ytr = trn["forward_return"].copy()
+        Xte = tst[fcols].copy()
+        yte = tst["forward_return"].copy()
+
+        med = Xtr.median()
+        Xtr = Xtr.fillna(med).replace([np.inf, -np.inf], np.nan).fillna(med)
+        Xte = Xte.fillna(med).replace([np.inf, -np.inf], np.nan).fillna(med)
+
+        Xtr = rank_features(Xtr, fcols)
+        Xte = rank_features(Xte, fcols)
+
+        ytr = ytr.clip(ytr.quantile(0.02), ytr.quantile(0.98))
+
+        models = _get_models()
+        for name, m in models.items():
+            try:
+                m.fit(Xtr, ytr)
+                p = m.predict(Xte)
+                ic = stats.spearmanr(p, yte.values)[0] if len(yte) > 5 else 0
+                per_model_oos.setdefault(name, []).append(ic)
+            except Exception as e:
+                logger.debug("train_simple OOS: %s failed: %s", name, e)
+                per_model_oos.setdefault(name, []).append(0)
+
+        ens = {n: {"model": m, "ic": np.mean(per_model_oos.get(n, [])) or 0.01} for n, m in models.items()}
+        ep, _ = predict_ensemble(ens, Xte)
+        for j, (_, row) in enumerate(tst.iterrows()):
+            oos_preds.append({"predicted": ep[j], "actual": row["forward_return"]})
+
+    oos_df = pd.DataFrame(oos_preds)
+    if len(oos_df) > 10:
+        rc, _ = stats.spearmanr(oos_df["predicted"], oos_df["actual"])
+        oos_ic = round(float(rc), 4) if rc == rc else 0.0
+    else:
+        oos_ic = 0.0
+
+    # 4) Entraîner l'ensemble final sur TOUTES les périodes
+    if callback:
+        callback("Training final ensemble (all periods)...")
+    X_all = df[fcols].copy()
+    y_all = df["forward_return"].copy()
+    medians = X_all.median()
+    X_all = X_all.fillna(medians).replace([np.inf, -np.inf], np.nan).fillna(medians)
+    X_all = rank_features(X_all, fcols)
+    X_all = X_all.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    y_all = y_all.clip(y_all.quantile(0.02), y_all.quantile(0.98))
+
     ensemble = {}
-    for name,m in _get_models().items():
+    for name, m in _get_models().items():
         try:
-            from sklearn.model_selection import cross_val_score
-            cv=cross_val_score(m,X,y,cv=5,scoring="r2"); m.fit(X,y)
-            ensemble[name]={"model":m,"cv_r2":round(cv.mean(),4),"ic":round(cv.mean(),4)}
-            if callback: callback(f"  {name}: CV R2={cv.mean():.3f}")
+            m.fit(X_all, y_all)
+            ic = np.mean(per_model_oos.get(name, [])) if per_model_oos.get(name) else 0.0
+            ensemble[name] = {"model": m, "cv_r2": round(ic, 4), "ic": round(ic, 4)}
+            if callback:
+                callback(f"  {name}: OOS IC={ic:.4f}")
         except Exception as e:
-            logger.warning("train_simple: ensemble fit %s failed: %s", name, e)
-    feat_imp = _get_feature_importance(ensemble,fcols)
-    preds,blend = predict_ensemble(ensemble,X)
-    df["alpha_score_raw"] = preds
-    df["alpha_score_raw"] = df["alpha_score_raw"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    df["alpha_score"] = factor_neutralize_scores(
-        df,
+            logger.warning("train_simple final fit: %s failed: %s", name, e)
+
+    # 5) Features et prédictions à la date courante
+    current_records = []
+    for ticker in valid_tickers:
+        try:
+            if not isinstance(prices.columns, pd.MultiIndex):
+                continue
+            close = prices[(ticker, "Close")].dropna()
+            if len(close) < 252:
+                continue
+            fund = yf_fundamentals.get(ticker, {})
+            row = {
+                "ticker": ticker,
+                "name": fund.get("shortName", ticker),
+                "sector": fund.get("sector", "Unknown"),
+            }
+            c = close
+            row["momentum_12_1"] = c.iloc[-21] / c.iloc[-252] - 1
+            row["return_1m"] = c.pct_change(21).iloc[-1]
+            row["return_3m"] = c.pct_change(63).iloc[-1]
+            row["return_6m"] = c.pct_change(126).iloc[-1]
+            daily = c.pct_change().dropna()
+            row["volatility_3m"] = daily.tail(63).std() * np.sqrt(252)
+            row["volatility_12m"] = daily.tail(252).std() * np.sqrt(252)
+            row["price_vs_ma50"] = c.iloc[-1] / c.tail(50).mean() - 1
+            row["price_vs_ma200"] = c.iloc[-1] / c.tail(200).mean() - 1
+            row["drawdown_from_high"] = c.iloc[-1] / c.tail(252).max() - 1
+            if sentiment_scores:
+                row["news_sentiment"] = sentiment_scores.get(ticker, 0.0)
+            sec = fund.get("sector", "")
+            row["macro_fed"] = macro.get("fed_funds_rate", 4)
+            row["macro_oil"] = macro.get("oil_price", 80)
+            row["macro_vix"] = macro.get("vix", 22)
+            row["tech_x_rates"] = (1 if sec in ["Technology", "Communication Services"] else 0) * row["macro_fed"]
+            row["energy_x_oil"] = (1 if sec == "Energy" else 0) * row["macro_oil"]
+            if sentiment_scores:
+                s = sentiment_scores.get(ticker, 0.0)
+                row["sentiment_x_momentum"] = s * row.get("momentum_12_1", 0)
+            current_records.append(row)
+        except Exception as e:
+            logger.debug("train_simple current: %s failed: %s", ticker, e)
+
+    results = pd.DataFrame(current_records)
+    if len(results) == 0:
+        logger.warning("train_simple: no current records built")
+        return None, None, None, None, None, None
+
+    Xc = results[fcols].fillna(medians).replace([np.inf, -np.inf], np.nan).fillna(medians)
+    Xc = rank_features(Xc, fcols)
+    Xc = Xc.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    preds, blend = predict_ensemble(ensemble, Xc, return_per_model=True)
+
+    n_models = sum(1 for info in ensemble.values() if info.get("model") is not None)
+    if n_models > 1 and "per_model_preds" in blend:
+        per_model = blend["per_model_preds"]
+        pos_count = np.zeros(len(Xc))
+        for p in per_model.values():
+            pos_count += (np.asarray(p) > 0).astype(float)
+        results["model_agreement_score"] = (pos_count / n_models).round(3)
+    else:
+        results["model_agreement_score"] = 1.0
+
+    results["alpha_score_raw"] = preds
+    results["alpha_score_raw"] = results["alpha_score_raw"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    results["alpha_score"] = factor_neutralize_scores(
+        results,
         score_col="alpha_score_raw",
-        sector_col="sector"
+        sector_col="sector",
     )
-    df["alpha_score"] = df["alpha_score"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    df["predicted_return_pct"] = (df["alpha_score_raw"] * 100).round(2)
-    df["predicted_return_pct"] = df["predicted_return_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    df["model_agreement_score"] = 1.0
-    df=df.sort_values("alpha_score",ascending=False).reset_index(drop=True)
-    df["alpha_rank"]=range(1,len(df)+1); df["rank"]=df["alpha_rank"]
-    med,std=np.median(preds),np.std(preds)
-    df["confidence"]=((preds-med)/std).round(2) if std>0 else 0
-    df["confidence"] = df["confidence"].fillna(0.0)
-    ar, cr = df["alpha_score"], df["confidence"]
+    results["alpha_score"] = results["alpha_score"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    results["predicted_return_pct"] = (results["alpha_score_raw"] * 100).round(2)
+    results["predicted_return_pct"] = results["predicted_return_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    results = results.sort_values("alpha_score", ascending=False).reset_index(drop=True)
+    results["alpha_rank"] = range(1, len(results) + 1)
+    results["rank"] = results["alpha_rank"]
+
+    med_pred, std_pred = np.median(preds), np.std(preds)
+    results["confidence"] = ((preds - med_pred) / std_pred).round(2) if std_pred > 0 else 0
+    results["confidence"] = results["confidence"].fillna(0.0)
+    ar, cr = results["alpha_score"], results["confidence"]
     a_norm = (ar - ar.min()) / (ar.max() - ar.min() + 1e-9)
     c_norm = (cr - cr.min()) / (cr.max() - cr.min() + 1e-9)
-    df["reliability_score"] = (0.4 * a_norm + 0.3 * c_norm + 0.3 * df["model_agreement_score"]).round(3)
-    df["reliability_score"] = df["reliability_score"].fillna(0.0)
-    assert df["predicted_return_pct"].isna().sum() == 0, f"NaN in predicted_return_pct: {df['predicted_return_pct'].isna().sum()}"
-    pm = {n:{"cv_r2":info.get("cv_r2",0)} for n,info in ensemble.items()}
-    oos_metrics = {"mode":"simple_ensemble","n_stocks":len(X),"n_features":len(fcols),
-                   "per_model":pm,"blend":blend,"caveat":"Technical features only.",
-                   "mean_ic":0,"ic_ir":0,"hit_rate":0.5,"spearman_rank_corr":0}
-    return ensemble,medians,fcols,df,feat_imp,oos_metrics
+    results["reliability_score"] = (
+        0.4 * a_norm + 0.3 * c_norm + 0.3 * results["model_agreement_score"]
+    ).round(3)
+    results["reliability_score"] = results["reliability_score"].fillna(0.0)
+
+    nan_count = results["predicted_return_pct"].isna().sum()
+    if nan_count > 0:
+        logger.warning("train_simple: %d NaN in predicted_return_pct, filling with 0", nan_count)
+        results["predicted_return_pct"] = results["predicted_return_pct"].fillna(0.0)
+
+    feat_imp = _get_feature_importance(ensemble, fcols)
+    pm = {n: {"ic": info.get("ic", 0)} for n, info in ensemble.items()}
+    hit_rate = (
+        round((oos_df["predicted"] * oos_df["actual"] > 0).mean(), 4) if len(oos_df) > 0 else 0.5
+    )
+    oos_metrics = {
+        "mode": "simple_walk_forward",
+        "n_stocks": len(results),
+        "n_features": len(fcols),
+        "n_oos_predictions": len(oos_df),
+        "spearman_rank_corr": oos_ic,
+        "mean_ic": oos_ic,
+        "ic_ir": 0,
+        "hit_rate": hit_rate,
+        "per_model": pm,
+        "blend": blend,
+    }
+    if callback:
+        callback(f"Simple walk-forward done: {len(results)} stocks, OOS IC={oos_ic:.4f}")
+    return ensemble, medians, fcols, results, feat_imp, oos_metrics
 
 # ══════════════════════════════════════════════════════════════
 # MARKET REGIME DETECTION
