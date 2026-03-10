@@ -1576,18 +1576,26 @@ class AlphaRanker(ctk.CTk):
             messagebox.showerror("ISIN",f"Erreur: {e}")
 
     def _on_auto_fill_clicked(self):
+        # Ensure FMP_API_KEY is available for auto-fill (same as in _run_model)
         try:
-            target_str=self._universe_target_entry.get().strip() or "500"
-            target=int(target_str)
+            from core import portfolio
+            fmp_key = getattr(portfolio, "get_setting", None) and portfolio.get_setting("fmp_key")
+            if fmp_key:
+                os.environ["FMP_API_KEY"] = fmp_key
+        except Exception:
+            pass
+        try:
+            target_str = self._universe_target_entry.get().strip() or "500"
+            target = int(target_str)
         except ValueError:
-            target=500
+            target = 500
         try:
             from core.api_cache import get_isin_map
-            tickers=get_stored_universe_list()
-            imap=get_isin_map()
-            current_valid=sum(1 for t in tickers if imap.get(t))
+            tickers = get_stored_universe_list()
+            imap = get_isin_map()
+            current_valid = sum(1 for t in tickers if imap.get(t))
         except Exception:
-            current_valid=0
+            current_valid = 0
         if current_valid>=target:
             messagebox.showinfo("Auto-Fill",f"L'univers atteint déjà la cible ({current_valid}/{target}).")
             return
