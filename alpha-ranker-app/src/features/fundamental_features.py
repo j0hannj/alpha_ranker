@@ -107,8 +107,9 @@ def build_features_asof(prices, fundamentals_db: Dict[str, List[dict]], macro: D
                         row["price_vs_ma200"] = cur / ma200 - 1
                 row["drawdown_from_high"] = cur / close.tail(min(252, len(close))).max() - 1
                 row["distance_from_low"] = cur / close.tail(min(252, len(close))).min() - 1
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("build_features_asof: price/technical feature failed for %s: %s", ticker, e)
         # Macro features (contemporaneous)
         if isinstance(macro, dict):
             for k, v in macro.items():
