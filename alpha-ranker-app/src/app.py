@@ -1599,9 +1599,11 @@ class AlphaRanker(ctk.CTk):
         self._btn_auto_fill.grid(row=0,column=4,padx=4,pady=2)
         self._btn_enrich_isins=ctk.CTkButton(autofill,text="Enrichir ISIN",width=100,height=28,font=("",10),fg_color="#166534",command=self._on_enrich_isins_clicked)
         self._btn_enrich_isins.grid(row=0,column=5,padx=4,pady=2)
-        self._universe_progress=ctk.CTkProgressBar(autofill,width=200,height=8); self._universe_progress.grid(row=0,column=6,padx=8,pady=2); self._universe_progress.grid_remove()
-        self._universe_status_lbl=ctk.CTkLabel(autofill,text="",font=("",9),text_color="#71717a"); self._universe_status_lbl.grid(row=0,column=7,padx=4,pady=2); self._universe_status_lbl.grid_remove()
-        self._btn_auto_fill_cancel=ctk.CTkButton(autofill,text="Annuler",width=80,height=28,font=("",10),fg_color="#7f1d1d",command=self._on_auto_fill_cancel); self._btn_auto_fill_cancel.grid(row=0,column=8,padx=4,pady=2); self._btn_auto_fill_cancel.grid_remove()
+        self._btn_repair_universe=ctk.CTkButton(autofill,text="Repair Universe",width=120,height=28,font=("",10),fg_color="#7c3aed",command=self._on_repair_universe_clicked)
+        self._btn_repair_universe.grid(row=0,column=6,padx=4,pady=2)
+        self._universe_progress=ctk.CTkProgressBar(autofill,width=200,height=8); self._universe_progress.grid(row=0,column=7,padx=8,pady=2); self._universe_progress.grid_remove()
+        self._universe_status_lbl=ctk.CTkLabel(autofill,text="",font=("",9),text_color="#71717a"); self._universe_status_lbl.grid(row=0,column=8,padx=4,pady=2); self._universe_status_lbl.grid_remove()
+        self._btn_auto_fill_cancel=ctk.CTkButton(autofill,text="Annuler",width=80,height=28,font=("",10),fg_color="#7f1d1d",command=self._on_auto_fill_cancel); self._btn_auto_fill_cancel.grid(row=0,column=9,padx=4,pady=2); self._btn_auto_fill_cancel.grid_remove()
         self._universe_auto_fill_cancel_event=None
         # Left: list of tickers (Treeview) + add ISIN manually
         left=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8,width=220); left.grid(row=2,column=0,sticky="nsew",padx=(0,4),pady=0)
@@ -1808,6 +1810,64 @@ class AlphaRanker(ctk.CTk):
     def _on_auto_fill_cancel(self):
         if getattr(self,"_universe_auto_fill_cancel_event",None):
             self._universe_auto_fill_cancel_event.set()
+
+    def _on_repair_universe_clicked(self):
+        """Open Repair Universe dialog: progress + log, optional dry run."""
+        import threading
+        d = ctk.CTkToplevel(self)
+        d.title("Repair Universe")
+        d.geometry("560x420")
+        d.grab_set()
+        d.attributes("-topmost", True)
+        top = ctk.CTkFrame(d, fg_color="transparent")
+        top.pack(fill="x", padx=10, pady=8)
+        dry_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(top, text="Dry run (show suggestions only, do not save)", variable=dry_var, font=("", 10)).pack(side="left", padx=(0, 12))
+        prog = ctk.CTkProgressBar(top, width=200, height=8)
+        prog.pack(side="left", padx=4)
+        cancel_ev = threading.Event()
+        cancel_btn = ctk.CTkButton(top, text="Cancel", width=80, height=26, font=("", 10), fg_color="#7f1d1d", command=lambda: cancel_ev.set())
+        cancel_btn.pack(side="right", padx=4)
+        log_frame = ctk.CTkFrame(d, fg_color="#18181b", corner_radius=6)
+        log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        log_txt = ctk.CTkTextbox(log_frame, font=("Consolas", 10), wrap="word", height=280)
+        log_txt.pack(fill="both", expand=True, padx=4, pady=4)
+
+        def cb(msg, progress=None):
+            def _up():
+                log_txt.insert("end", str(msg) + "\n")
+                log_txt.see("end")
+                if progress is not None:
+                    prog.set(min(1.0, max(0.0, float(progress))))
+            self.after(0, _up)
+
+        def worker():
+            try:
+                from core import data as core_data
+                api_key = portfolio.get_setting("anthropic_key") or None
+                result = core_data.repair_universe(callback=cb, cancel_event=cancel_ev, dry_run=dry_var.get(), api_key=api_key)
+            except Exception as e:
+                self.after(0, lambda: cb("Error: " + str(e), progress=1.0))
+                result = {"fixed": [], "removed": [], "skipped": []}
+            n_fixed = len(result.get("fixed", []))
+            n_removed = len(result.get("removed", []))
+            self.after(0, lambda: self._repair_dialog_done(d, n_fixed, n_removed, dry_var.get()))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _repair_dialog_done(self, dialog, n_fixed, n_removed, dry_run):
+        try:
+            dialog.grab_release()
+            if dry_run:
+                messagebox.showinfo("Repair Universe", "Dry run finished. %d would be fixed, %d would be removed. Run without dry run to apply." % (n_fixed, n_removed))
+            else:
+                messagebox.showinfo("Repair Universe", "Done: %d fixed, %d removed." % (n_fixed, n_removed))
+            self._universe_fill_tickers()
+        finally:
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
 
     def _on_auto_fill_complete(self,result):
         self._btn_auto_fill.configure(state="normal")

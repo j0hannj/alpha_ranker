@@ -987,12 +987,12 @@ def repair_universe(callback=None, cancel_event=None, dry_run=False, api_key=Non
         callback(f"Repair: {len(suspects)} suspect tickers to process", progress=0)
 
     fixed, removed, skipped = [], [], []
-    use_llm = bool(api_key or getattr(agent, "_check_ollama", lambda: None)())
+    use_llm = False
     try:
         from . import agent
         use_llm = bool(api_key or agent._check_ollama())
     except Exception:
-        use_llm = False
+        pass
 
     for i, (ticker, info) in enumerate(suspects):
         if cancel_event and cancel_event.is_set():
