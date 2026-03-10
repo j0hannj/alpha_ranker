@@ -127,115 +127,290 @@ class UniverseBuilder:
 
 
 # ═══════════════════════════════════════════════════════════════
-# AUTO-FILL UNIVERSE (large caps until target count)
+# AUTO-FILL UNIVERSE (chained sources, no cap)
 # ═══════════════════════════════════════════════════════════════
 
 
-def fetch_largecap_candidates(
-    region: str = "global",
-    count: int = 800,
-) -> List[Dict[str, str]]:
-    """
-    Fetch large-cap stock candidates from free sources (Wikipedia, FMP if key).
-    Returns list of dicts: [{"ticker": "AAPL", "name": "Apple Inc", "sector": "Technology"}, ...].
-    """
-    candidates: List[Dict[str, str]] = []
-    seen: set = set()
+def _build_source_chain(
+    region: str,
+) -> List[Tuple[str, Callable[[int], Iterator[List[Dict]]]]]:
+    """Build ordered list of (source_name, generator_fn) based on region."""
+    chain: List[Tuple[str, Callable[[int], Iterator[List[Dict]]]]] = []
 
-    # 1) S&P 500 from Wikipedia (US large caps)
+    if region in ("us", "global"):
+        chain.append(("S&P 500 (Wikipedia)", _source_wikipedia_sp500))
+    if region in ("europe", "global"):
+        chain.append(("STOXX 600 (Wikipedia)", _source_wikipedia_stoxx600))
+    if region in ("europe", "global"):
+        chain.append(("FTSE 100 (Wikipedia)", _source_wikipedia_ftse100))
+    if region in ("asia", "global"):
+        chain.append(("Nikkei 225 (Wikipedia)", _source_wikipedia_nikkei225))
+    if region in ("us", "global"):
+        chain.append(("yfinance screener US", lambda n: _source_yfinance_screener(n, market="us")))
+    if region in ("europe", "global"):
+        chain.append(("yfinance screener EU", lambda n: _source_yfinance_screener(n, market="europe")))
+    if region in ("asia", "global"):
+        chain.append(("yfinance screener Asia", lambda n: _source_yfinance_screener(n, market="asia")))
+    chain.append(("Financial Modeling Prep", _source_fmp))
+    return chain
+
+
+def _source_wikipedia_sp500(needed: int) -> Iterator[List[Dict]]:
+    """Yield S&P 500 constituents from Wikipedia (single batch)."""
     try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         tables = pd.read_html(url)
         df = tables[0]
+        batch = []
         for _, row in df.iterrows():
             ticker = str(row.get("Symbol", row.get("Ticker", ""))).strip().replace(".", "-")
-            if not ticker or ticker in seen:
+            if not ticker or ticker == "nan":
                 continue
-            seen.add(ticker)
-            candidates.append({
+            batch.append({
                 "ticker": ticker,
                 "name": str(row.get("Security", row.get("Company", ticker)))[:60],
                 "sector": str(row.get("GICS Sector", ""))[:40],
+                "marketCap": None,
             })
-            if len(candidates) >= count:
-                return candidates
-    except Exception:
-        pass
+        if batch:
+            yield batch
+    except Exception as e:
+        logger.warning("Auto-fill: S&P 500 (Wikipedia) failed: %s", e)
+    yield []
 
-    # 2) Nasdaq-100 from Wikipedia
-    if len(candidates) < count:
-        try:
-            tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-            for t in tables:
-                col = "Ticker" if "Ticker" in t.columns else "Symbol"
-                if col not in t.columns:
+
+def _source_wikipedia_stoxx600(needed: int) -> Iterator[List[Dict]]:
+    """Yield STOXX 600 constituents from Wikipedia."""
+    try:
+        url = "https://en.wikipedia.org/wiki/STOXX_Europe_600"
+        tables = pd.read_html(url)
+        for table in tables:
+            cols = [str(c).lower() for c in table.columns]
+            ticker_col = next((c for c in table.columns if "ticker" in str(c).lower() or "symbol" in str(c).lower()), None)
+            if ticker_col is None:
+                continue
+            name_col = next((c for c in table.columns if "company" in str(c).lower() or "name" in str(c).lower()), None)
+            batch = []
+            for _, row in table.iterrows():
+                ticker = str(row[ticker_col]).strip()
+                if not ticker or ticker == "nan":
                     continue
-                for _, row in t.iterrows():
-                    ticker = str(row[col]).strip().replace(".", "-")
-                    if ticker and ticker not in seen:
-                        seen.add(ticker)
-                        candidates.append({
-                            "ticker": ticker,
-                            "name": str(row.get("Company", row.get("Security", ticker)))[:60],
-                            "sector": "",
-                        })
-                    if len(candidates) >= count:
-                        return candidates
-                break
-        except Exception:
-            pass
+                name = str(row[name_col]).strip() if name_col else ""
+                batch.append({"ticker": ticker, "name": name[:60], "sector": "", "marketCap": None})
+            if batch:
+                yield batch
+                return
+    except Exception as e:
+        logger.warning("Auto-fill: STOXX 600 (Wikipedia) failed: %s", e)
+    yield []
 
-    # 3) FMP stock screener by market cap (if API key)
-    if len(candidates) < count:
-        fmp_key = os.environ.get("FMP_API_KEY")
-        if fmp_key:
-            try:
-                import urllib.request
-                import json
-                url = (
-                    f"https://financialmodelingprep.com/api/v3/stock-screener?"
-                    f"marketCapMoreThan=1000000000&limit={count + 200}&apikey={fmp_key}"
-                )
-                with urllib.request.urlopen(url, timeout=30) as r:
-                    data = json.loads(r.read().decode())
-                for item in (data or []):
-                    sym = (item.get("symbol") or "").strip()
-                    if not sym or sym in seen:
-                        continue
-                    seen.add(sym)
-                    candidates.append({
-                        "ticker": sym,
-                        "name": (item.get("companyName") or sym)[:60],
+
+def _source_wikipedia_ftse100(needed: int) -> Iterator[List[Dict]]:
+    """Yield FTSE 100 constituents from Wikipedia (Yahoo suffix .L)."""
+    try:
+        url = "https://en.wikipedia.org/wiki/FTSE_100_Index"
+        tables = pd.read_html(url)
+        for table in tables:
+            cols = [str(c).lower() for c in table.columns]
+            ticker_col = next((c for c in table.columns if "ticker" in str(c).lower() or "epic" in str(c).lower() or "symbol" in str(c).lower()), None)
+            if ticker_col is None:
+                continue
+            name_col = next((c for c in table.columns if "company" in str(c).lower()), None)
+            batch = []
+            for _, row in table.iterrows():
+                ticker = str(row[ticker_col]).strip()
+                if not ticker or ticker == "nan":
+                    continue
+                yf_ticker = ticker + ".L" if not ticker.endswith(".L") else ticker
+                name = str(row[name_col]).strip() if name_col else ""
+                batch.append({"ticker": yf_ticker, "name": name[:60], "sector": "", "marketCap": None})
+            if batch:
+                yield batch
+                return
+    except Exception as e:
+        logger.warning("Auto-fill: FTSE 100 (Wikipedia) failed: %s", e)
+    yield []
+
+
+def _source_wikipedia_nikkei225(needed: int) -> Iterator[List[Dict]]:
+    """Yield Nikkei 225 constituents from Wikipedia (Yahoo suffix .T)."""
+    try:
+        url = "https://en.wikipedia.org/wiki/Nikkei_225"
+        tables = pd.read_html(url)
+        for table in tables:
+            ticker_col = next((c for c in table.columns if "ticker" in str(c).lower() or "code" in str(c).lower() or "symbol" in str(c).lower()), None)
+            if ticker_col is None:
+                continue
+            name_col = next((c for c in table.columns if "company" in str(c).lower() or "name" in str(c).lower()), None)
+            batch = []
+            for _, row in table.iterrows():
+                ticker = str(row[ticker_col]).strip()
+                if not ticker or ticker == "nan":
+                    continue
+                yf_ticker = ticker + ".T" if not ticker.endswith(".T") else ticker
+                name = str(row[name_col]).strip() if name_col else ""
+                batch.append({"ticker": yf_ticker, "name": name[:60], "sector": "", "marketCap": None})
+            if batch:
+                yield batch
+                return
+    except Exception as e:
+        logger.warning("Auto-fill: Nikkei 225 (Wikipedia) failed: %s", e)
+    yield []
+
+
+def _source_yfinance_screener(needed: int, market: str = "us") -> Iterator[List[Dict]]:
+    """Yield large-cap stocks from yfinance screener, paginated. Market: us, europe, asia."""
+    page_size = 250
+    offset = 0
+    max_pages = 20
+    for page in range(max_pages):
+        try:
+            import yfinance as yf
+            screener = yf.Screener()
+            body = {
+                "offset": offset,
+                "size": page_size,
+                "sortField": "intradaymarketcap",
+                "sortType": "desc",
+                "quoteType": "equity",
+                "query": {
+                    "operator": "and",
+                    "operands": [
+                        {"operator": "gt", "operands": ["intradaymarketcap", 1_000_000_000]},
+                    ],
+                },
+            }
+            region_map = {"us": "us", "europe": "europe", "asia": "asia"}
+            if market in region_map:
+                body["query"]["operands"].append({"operator": "eq", "operands": ["region", region_map[market]]})
+            screener.set_default_body(body)
+            result = getattr(screener, "response", None) or {}
+            quotes = result.get("quotes", []) if isinstance(result, dict) else []
+            if not quotes:
+                break
+            batch = []
+            for q in quotes:
+                ticker = (q.get("symbol") or q.get("ticker") or "").strip()
+                if ticker:
+                    batch.append({
+                        "ticker": ticker,
+                        "name": (q.get("shortName") or q.get("longName") or ticker)[:60],
+                        "marketCap": q.get("marketCap"),
+                        "sector": (q.get("sector") or "")[:40],
+                    })
+            if batch:
+                yield batch
+            offset += page_size
+            if len(quotes) < page_size:
+                break
+            time.sleep(0.5)
+        except Exception as e:
+            logger.warning("Auto-fill: yfinance screener %s page %s failed: %s", market, page, e)
+            break
+
+
+def _source_fmp(needed: int) -> Iterator[List[Dict]]:
+    """Yield large-cap stocks from FMP API, paginated. Requires FMP_API_KEY."""
+    if not os.getenv("FMP_API_KEY"):
+        logger.info("FMP API key not configured, skipping")
+        return
+    page_size = 1000
+    offset = 0
+    max_pages = 10
+    api_key = os.environ["FMP_API_KEY"]
+    for page in range(max_pages):
+        try:
+            import urllib.request
+            import json
+            url = (
+                f"https://financialmodelingprep.com/api/v3/stock-screener?"
+                f"marketCapMoreThan=1000000000&limit={page_size}&offset={offset}&apikey={api_key}"
+            )
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = json.loads(r.read().decode())
+            if not data:
+                break
+            batch = []
+            for item in data:
+                ticker = (item.get("symbol") or "").strip()
+                if ticker:
+                    batch.append({
+                        "ticker": ticker,
+                        "name": (item.get("companyName") or ticker)[:60],
+                        "marketCap": item.get("marketCap"),
                         "sector": (item.get("sector") or "")[:40],
                     })
-                    if len(candidates) >= count:
-                        break
-            except Exception:
-                pass
+            if batch:
+                yield batch
+            offset += page_size
+            if len(data) < page_size:
+                break
+            time.sleep(1.0)
+        except Exception as e:
+            logger.warning("Auto-fill: FMP page %s failed: %s", page, e)
+            break
 
-    return candidates[:count]
+
+def fetch_largecap_candidates_chained(
+    needed: int,
+    existing_tickers: Set[str],
+    existing_isins: Set[str],
+    region: str = "global",
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_event: Optional[object] = None,
+) -> List[Dict]:
+    """
+    Fetch large-cap candidates from ALL sources in sequence until 'needed' are collected.
+    Dedup by ticker and skip if ISIN already in universe. No artificial cap.
+    """
+    candidates: List[Dict] = []
+    seen_tickers = set(existing_tickers)
+
+    for source_name, source_fn in _build_source_chain(region):
+        if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+            break
+        if len(candidates) >= needed:
+            break
+        if progress_callback:
+            progress_callback(len(candidates), needed, f"Source: {source_name}…")
+        logger.info("Auto-fill: fetching from %s (still need %s)", source_name, needed - len(candidates))
+        try:
+            for batch in source_fn(needed - len(candidates)):
+                if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+                    break
+                if len(candidates) >= needed:
+                    break
+                for stock in batch:
+                    if len(candidates) >= needed:
+                        break
+                    ticker = (stock.get("ticker") or "").strip()
+                    if not ticker or ticker in seen_tickers:
+                        continue
+                    seen_tickers.add(ticker)
+                    stock = dict(stock)
+                    stock["source"] = source_name
+                    candidates.append(stock)
+        except Exception as e:
+            logger.warning("Auto-fill: source %s failed: %s", source_name, e)
+    return candidates
 
 
 def auto_fill_universe(
     target_count: int,
+    current_universe: Optional[List[Dict]] = None,
+    region: str = "global",
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     cancel_event: Optional[object] = None,
 ) -> Dict:
     """
-    Fill the universe with large-cap stocks (with valid ISIN) until target_count is reached.
-    Uses stored universe + isin_map from core.api_cache. Adds tickers and persists ISINs.
-    Returns:
-        added: list of {"ticker", "isin", "name", "sector", "source": "auto_fill"}
-        failed: list of tickers where ISIN resolution failed
-        universe_size: total valid count after run
-        target_reached: bool
+    Fill the universe with large-cap stocks until target_count. Chains ALL sources.
+    Dedup by ticker and ISIN. Returns added, failed, universe_size, target_reached, sources_used.
     """
     try:
         from core.api_cache import (
             get_stored_universe_list,
             set_stored_universe_list,
             get_isin_map,
-            set_isin_map,
         )
     except ImportError:
         return {
@@ -243,11 +418,20 @@ def auto_fill_universe(
             "failed": [],
             "universe_size": 0,
             "target_reached": False,
+            "sources_used": [],
         }
 
-    current_tickers = set(get_stored_universe_list())
+    tickers_list = get_stored_universe_list()
     isin_map = get_isin_map()
-    current_valid = sum(1 for t in current_tickers if isin_map.get(t))
+    existing_tickers: Set[str] = set(tickers_list)
+    existing_isins: Set[str] = {v for v in isin_map.values() if v}
+    if current_universe is not None:
+        for s in current_universe:
+            if s.get("ticker"):
+                existing_tickers.add(s["ticker"])
+            if s.get("isin"):
+                existing_isins.add(s["isin"])
+    current_valid = sum(1 for t in tickers_list if isin_map.get(t))
     needed = target_count - current_valid
 
     if needed <= 0:
@@ -256,53 +440,59 @@ def auto_fill_universe(
             "failed": [],
             "universe_size": current_valid,
             "target_reached": True,
+            "sources_used": [],
         }
 
-    fetch_count = min(2000, int(needed * 1.5) + 50)
-    candidates = fetch_largecap_candidates(region="global", count=fetch_count)
-    candidates = [c for c in candidates if c["ticker"] not in current_tickers]
+    overfetch = max(needed, int(needed * 1.5) + 100)
+    candidates = fetch_largecap_candidates_chained(
+        needed=overfetch,
+        existing_tickers=existing_tickers,
+        existing_isins=existing_isins,
+        region=region,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+    )
 
     added: List[Dict] = []
     failed: List[str] = []
+    sources_used: Set[str] = set()
 
-    for i, candidate in enumerate(candidates):
+    for candidate in candidates:
         if getattr(cancel_event, "is_set", lambda: False)():
             break
         if len(added) >= needed:
             break
-
         ticker = candidate["ticker"]
         if progress_callback:
             progress_callback(
                 len(added),
                 needed,
-                f"Résolution ISIN pour {ticker}…",
+                f"Résolution ISIN pour {ticker} ({candidate.get('source', '?')})…",
             )
-
         isin = isin_mapper.map_ticker_to_isin(ticker)
-
-        if isin:
+        if isin and isin not in existing_isins:
             entry = {
                 "ticker": ticker,
                 "isin": isin,
                 "name": candidate.get("name", ""),
                 "sector": candidate.get("sector", ""),
-                "source": "auto_fill",
+                "source": candidate.get("source", "auto_fill"),
             }
             added.append(entry)
-            current_tickers.add(ticker)
+            existing_tickers.add(ticker)
+            existing_isins.add(isin)
+            sources_used.add(candidate.get("source", "unknown"))
         else:
             failed.append(ticker)
 
-    # Persist: extend stored universe and isin_map (already updated by mapper)
     if added:
-        new_list = list(current_tickers)
-        set_stored_universe_list(new_list)
+        set_stored_universe_list(list(existing_tickers))
 
     return {
         "added": added,
         "failed": failed,
         "universe_size": current_valid + len(added),
         "target_reached": (current_valid + len(added)) >= target_count,
+        "sources_used": list(sources_used),
     }
 
