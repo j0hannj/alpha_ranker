@@ -64,7 +64,26 @@ class UniverseBuilder:
             from core.data import fetch_universe
 
             tickers, _, _ = fetch_universe()
-            return Universe(isins=[], tickers=list(tickers))
+            tickers = list(tickers)
+            # Optional: resolve tickers to ISINs and warn on low coverage
+            try:
+                from .isin_mapper import batch_map_tickers_to_isin, report_isin_coverage
+                ticker_to_isin, source_counts = batch_map_tickers_to_isin(tickers)
+                isins = [ticker_to_isin.get(t) or "" for t in tickers]
+                isins = [i for i in isins if i]
+                resolved = len(isins)
+                total = len(tickers)
+                if report_isin_coverage and total > 0:
+                    report_isin_coverage(total, resolved, source_counts)
+                if total >= 50 and resolved < 0.8 * total:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "ISIN coverage %.0f%% < 80%%. Consider adding OPENFIGI_API_KEY or static_isins.csv.",
+                        (resolved / total * 100),
+                    )
+            except Exception:
+                pass
+            return Universe(isins=[], tickers=tickers)
         except Exception:
             return Universe(isins=[], tickers=[])
 

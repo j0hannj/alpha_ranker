@@ -79,6 +79,17 @@ class DataPipeline:
         uni = self.universe_builder.build(source=source, identifiers=identifiers)
         tickers = list(set(uni.tickers + list(extra_tickers or [])))
 
+        # 0) ISIN resolution (multi-source) and coverage logging
+        try:
+            from .isin_mapper import batch_map_tickers_to_isin, report_isin_coverage
+            _ticker_to_isin, _source_stats = batch_map_tickers_to_isin(tickers)
+            if report_isin_coverage:
+                report_isin_coverage(
+                    len(tickers), len(_ticker_to_isin), _source_stats
+                )
+        except Exception:
+            pass
+
         # 1) Prices + basic fundamentals from Yahoo (primary)
         prices, yf_fund = self.yahoo.fetch_prices_and_fundamentals(tickers)
 
