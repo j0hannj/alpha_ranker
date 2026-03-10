@@ -1218,43 +1218,100 @@ def fetch_ratios(ticker, api_key=None):
     return results
 
 # ── MACRO (FRED) ──────────────────────────────────────────────
+def _macro_row_to_db(macro_dict, source="FRED"):
+    """Build one row for table macro from a macro dict (date + series)."""
+    date_val = macro_dict.get("date") or datetime.now().strftime("%Y-%m-%d")
+    return {
+        "date": date_val,
+        "fed_funds_rate": macro_dict.get("fed_funds_rate"),
+        "us_10y_yield": macro_dict.get("us_10y_yield"),
+        "us_2y_yield": macro_dict.get("us_2y_yield"),
+        "yield_curve_slope": macro_dict.get("yield_curve_slope"),
+        "cpi_yoy": macro_dict.get("cpi_yoy"),
+        "oil_price": macro_dict.get("oil_price"),
+        "vix": macro_dict.get("vix"),
+        "credit_spread": macro_dict.get("credit_spread"),
+        "source": source,
+    }
+
+
 def fetch_macro(callback=None):
-    """Fetch macro indicators from FRED. Cached in SQLite 24h."""
+    """Fetch macro indicators from FRED. Cached in SQLite 24h. Persists every fetch into DB (table macro)."""
     try:
         from .api_cache import get, set
         cached = get("fred", "macro", max_age_hours=24)
         if cached is not None:
-            if callback: callback("Macro: cache hit")
+            if callback:
+                callback("Macro: cache hit")
+            try:
+                from . import portfolio as _pf
+                _pf.upsert_macro([_macro_row_to_db(cached, source="FRED")])
+            except Exception as e:
+                logger.warning("fetch_macro: upsert_macro (cache path) failed: %s", e)
             return cached
     except Exception as e:
         logger.debug("fetch_macro: api_cache get failed: %s", e)
-    if callback: callback("Macro: fetching FRED...")
-    fallback = {"date":datetime.now().strftime("%Y-%m-%d"),
-                "fed_funds_rate":4.5,"us_10y_yield":4.1,"yield_curve_slope":-0.4,
-                "cpi_yoy":3.0,"oil_price":80,"vix":22,"credit_spread":1.5}
+    if callback:
+        callback("Macro: fetching FRED...")
+    fallback = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "fed_funds_rate": 4.5,
+        "us_10y_yield": 4.1,
+        "yield_curve_slope": -0.4,
+        "cpi_yoy": 3.0,
+        "oil_price": 80,
+        "vix": 22,
+        "credit_spread": 1.5,
+    }
     api_key = os.environ.get("FRED_API_KEY")
-    if not api_key: return fallback
+    if not api_key:
+        try:
+            from . import portfolio as _pf
+            _pf.upsert_macro([_macro_row_to_db(fallback, source="fallback")])
+        except Exception as e:
+            logger.warning("fetch_macro: upsert_macro (fallback) failed: %s", e)
+        return fallback
     try:
         from fredapi import Fred
         fred = Fred(api_key=api_key)
-        end = datetime.now(); start = end - timedelta(days=365)
+        end = datetime.now()
+        start = end - timedelta(days=365)
         macro = {"date": end.strftime("%Y-%m-%d")}
-        for name, sid in {"fed_funds_rate":"FEDFUNDS","us_10y_yield":"DGS10","us_2y_yield":"DGS2",
-                          "vix":"VIXCLS","oil_price":"DCOILWTICO","credit_spread":"BAA10Y"}.items():
+        for name, sid in {
+            "fed_funds_rate": "FEDFUNDS",
+            "us_10y_yield": "DGS10",
+            "us_2y_yield": "DGS2",
+            "vix": "VIXCLS",
+            "oil_price": "DCOILWTICO",
+            "credit_spread": "BAA10Y",
+        }.items():
             try:
                 s = fred.get_series(sid, start, end)
-                if len(s) > 0: macro[name] = round(float(s.dropna().iloc[-1]),2)
+                if len(s) > 0:
+                    macro[name] = round(float(s.dropna().iloc[-1]), 2)
             except Exception as e:
                 logger.debug("fetch_macro: FRED series %s failed: %s", sid, e)
         if "us_10y_yield" in macro and "us_2y_yield" in macro:
-            macro["yield_curve_slope"] = round(macro["us_10y_yield"]-macro["us_2y_yield"],2)
+            macro["yield_curve_slope"] = round(
+                macro["us_10y_yield"] - macro["us_2y_yield"], 2
+            )
         try:
             set("fred", "macro", macro)
         except Exception as e:
             logger.debug("fetch_macro: api_cache set failed: %s", e)
+        try:
+            from . import portfolio as _pf
+            _pf.upsert_macro([_macro_row_to_db(macro, source="FRED")])
+        except Exception as e:
+            logger.warning("fetch_macro: upsert_macro failed: %s", e)
         return macro
     except Exception as e:
         logger.warning("fetch_macro: FRED fetch failed, using fallback: %s", e)
+        try:
+            from . import portfolio as _pf
+            _pf.upsert_macro([_macro_row_to_db(fallback, source="fallback")])
+        except Exception as ex:
+            logger.warning("fetch_macro: upsert_macro (fallback) failed: %s", ex)
         return fallback
 
 # ── FX (exchangerate.host + yfinance fallback) ────────────────
