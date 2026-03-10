@@ -5,14 +5,6 @@
   },
   {
     "role": "assistant",
-    "content": "1. Portefeuille : €25 348, P&L quotidien : +€0 € (neutre aujourd’hui).  \n2. Marchés nocturnes : Dow‑Jones en baisse de ≈ –0,6 % après l’annonce de la Fed à 4,5 % et une courbe de rendement inversée (pente –0,4). Le VIX reste à 22, volatilité modérée. Le pétrole se maintient à $80, limitant l’impact inflation‑materias.  \n3. Titres : aucune nouvelle majeure n’affecte AAPL, AMZN, AVGO, BRK‑B, GOOG, IONQ, MSFT, NVDA ou PLTR.  \n4. Insight : votre portefeuille est fortement tech (26 %). Ajouter un ETF obligataire défensif (ex : iShares U.S. Treasury Bond ETF) réduirait la volatilité tech tout en conservant un profil risque modéré."
-  },
-  {
-    "role": "user",
-    "content": "Give me a SHORT morning market briefing in French. Include:\n1. How my portfolio is doing today (use the P&L data you have)\n2. Key market moves overnight (search news)\n3. Any news affecting my holdings specifically\n4. One actionable insight\nKeep it under 150 words. No greetings, go straight to the data."
-  },
-  {
-    "role": "assistant",
     "content": "PORTFOLIO : €25 348, P&L global : +€868 (+3,5 %).  \nMARCHÉS NUIT : Dow‑Jones en baisse ≈ –0,6 % après l’annonce de la Fed à 4,5 % et courbe inversée (pente –0,4). VIX 22, pétrole $80, inflation modérée.  \nTITRES : aucune info majeure sur AAPL, AMZN, AVGO, BRK‑B, GOOG, IONQ, MSFT, NVDA, PLTR.  \nINSIGHT : concentration tech à 26 %. Ajoutez un ETF obligataire défensif (ex : iShares U.S. Treasury Bond ETF) pour réduire la volatilité tech tout en restant aligné sur votre profil risque modéré."
   },
   {
@@ -126,6 +118,14 @@
   {
     "role": "assistant",
     "content": "PORTFOLIO: +868 EUR (+3,5 %). Gains dominés par IWDA.AS (+2,9 %) et VWCE.DE (+14,4 %). Tech en baisse: AAPL –2,8 %, AMZN –5,4 %, MSFT –14,5 %, PLTR –14,3 %; IONQ chute brutale –19,3 %.  \nMARCHÉ: [ACTION:search_news:European markets overnight]  \nACTUALITÉS: [ACTION:search_news:AAPL] [ACTION:search_news:AMZN] [ACTION:search_news:MSFT] [ACTION:search_news:PLTR] [ACTION:search_news:IONQ]  \nACTION: Réduisez l’exposition tech en vendant une partie de MSFT et PLTR ou en liquidant IONQ pour limiter la volatilité."
+  },
+  {
+    "role": "user",
+    "content": "Give me a SHORT morning market briefing in French. Include:\n1. How my portfolio is doing today (use the P&L data you have)\n2. Key market moves overnight (search news)\n3. Any news affecting my holdings specifically\n4. One actionable insight\nKeep it under 150 words. No greetings, go straight to the data."
+  },
+  {
+    "role": "assistant",
+    "content": "PORTFOLIO : +868 EUR (+3,5 %). Gains dominés par IWDA.AS (+2,9 %) et VWCE.DE (+14,4 %). Tech en baisse : AAPL –2,8 %, AMZN –5,4 %, MSFT –14,5 %, PLTR –14,3 %, IONQ –19,3 %.  \nMARCHÉ : [ACTION:search_news:European markets overnight]  \nACTUALITÉS : [ACTION:search_news:AAPL] [ACTION:search_news:AMZN] [ACTION:search_news:MSFT] [ACTION:search_news:PLTR] [ACTION:search_news:IONQ]  \nACTION : Réduisez l’exposition tech en vendant une partie de MSFT et PLTR ou en liquidant IONQ pour limiter la volatilité."
   },
   {
     "role": "user",
