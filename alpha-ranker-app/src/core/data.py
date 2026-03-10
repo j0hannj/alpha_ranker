@@ -199,8 +199,10 @@ def _fetch_universe_yfinance(callback=None):
 def fetch_universe_cached(years=5, callback=None):
     """
     Cached universe (tickers + fundamentals), refreshed at most every 24h.
-    Primary source: FMP screener. Secondary: yfinance.
+    Primary source: FMP screener. If FMP_API_KEY is missing, no universe is built.
     """
+    api_key = os.environ.get("FMP_API_KEY")
+
     if UNIVERSE_CACHE.exists():
         try:
             cache = json.loads(UNIVERSE_CACHE.read_text(encoding="utf-8"))
@@ -223,13 +225,15 @@ def fetch_universe_cached(years=5, callback=None):
             if callback:
                 callback(f"Cache error: {e}")
 
-    api_key = os.environ.get("FMP_API_KEY")
-    if api_key:
-        tickers, fundamentals = _fetch_universe_fmp(api_key, callback)
-    else:
+    if not api_key:
+        # Dans une vraie app financière, l'univers vient du data provider.
+        # Ici: FMP est obligatoire pour construire l'univers, on échoue explicitement.
         if callback:
-            callback("No FMP_API_KEY — using yfinance-only universe")
-        tickers, fundamentals = _fetch_universe_yfinance(callback)
+            callback("FMP_API_KEY is not set. Configure it in Settings to build the equity universe.")
+        logger.warning("fetch_universe_cached: missing FMP_API_KEY, returning empty universe")
+        return [], {}
+
+    tickers, fundamentals = _fetch_universe_fmp(api_key, callback)
 
     try:
         UNIVERSE_CACHE.write_text(
@@ -238,7 +242,7 @@ def fetch_universe_cached(years=5, callback=None):
                     "tickers": tickers,
                     "fundamentals": fundamentals,
                     "date": datetime.now().isoformat(),
-                    "source": "fmp" if api_key else "yfinance",
+                    "source": "fmp",
                 },
                 default=str,
             ),
