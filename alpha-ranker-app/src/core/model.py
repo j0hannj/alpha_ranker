@@ -1848,7 +1848,21 @@ def run_full_pipeline(callback=None):
             if callback: callback(f"  {lbl} done: IC={oos_metrics.get('spearman_rank_corr','?')} | {len(results_h)} stocks", (idx + 1) / total_h)
         if not all_horizon_results:
             return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="all_horizons_failed", macro_by_region=macro_by_region)
-        primary = all_horizon_results.get(primary_H) or next(iter(all_horizon_results.values()))
+        # Choose primary horizon preferring one with real OOS predictions.
+        primary = all_horizon_results.get(primary_H)
+        if primary is None or primary.get("oos_metrics", {}).get("n_predictions", 0) == 0:
+            # Fallback: best horizon with n_predictions>0, otherwise first.
+            with_oos = [
+                (H, d) for H, d in all_horizon_results.items()
+                if d.get("oos_metrics", {}).get("n_predictions", 0) > 0
+            ]
+            if with_oos:
+                # Prefer horizon closest to configured primary_H
+                primary_H, primary = sorted(
+                    with_oos, key=lambda x: abs(x[0] - primary_H)
+                )[0]
+            else:
+                primary_H, primary = next(iter(all_horizon_results.items()))
         results = primary["results"]
         feat_imp = primary["feat_imp"]
         oos_metrics = primary["oos_metrics"]
