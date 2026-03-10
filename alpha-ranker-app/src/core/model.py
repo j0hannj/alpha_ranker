@@ -1112,8 +1112,13 @@ def run_full_pipeline(callback=None):
         config = {}
     horizons_cfg = config.get("horizons", [3, 6, 12, 24, 120])
     training_window_years = int(config.get("training_window_years", 3))
-    data_years = max(training_window_years, max(horizons_cfg) // 12 if horizons_cfg else 5)
-    if callback: callback(f"Loading {data_years} years of data for horizons {horizons_cfg}...")
+    try:
+        from .engine_config import get_data_settings
+        max_history = int(get_data_settings().get("data_max_history_years", 15))
+    except Exception:
+        max_history = 15
+    data_years = min(max(training_window_years, max(horizons_cfg) // 12 if horizons_cfg else 5), max_history)
+    if callback: callback(f"Loading up to {data_years}y data (max {max_history}y) for horizons {horizons_cfg}...")
     alldata = fetch_all_data(years=data_years, callback=callback)
     tickers = alldata["tickers"]; prices = alldata["prices"]
     yf_fund = alldata["fundamentals"]; macro = alldata["macro"]
