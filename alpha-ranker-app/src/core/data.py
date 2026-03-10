@@ -129,8 +129,58 @@ def scan_and_expand_universe(callback=None):
     # 1) Liste brute via /available-traded/list (GRATUIT)
     all_instruments = _fetch_all_traded(api_key, uv, callback)
     if not all_instruments:
-        logger.warning("scan_and_expand_universe: available-traded/list returned empty; falling back to known universe")
-        return _load_known_universe_as_fundamentals()
+        # Si même les endpoints FMP "free" ne sont pas accessibles (403 ou autre),
+        # on bascule sur un univers full-yfinance pour quand même découvrir des actions.
+        logger.warning("scan_and_expand_universe: available-traded/list returned empty; falling back to yfinance-only universe")
+        try:
+            yf_tickers, yf_fundamentals = _fetch_universe_yfinance(callback=callback)
+            logger.info("scan_and_expand_universe: yfinance-only universe size=%d", len(yf_tickers))
+            # Marquer les découvertes par rapport à la DB actuelle
+            known = portfolio.get_universe() or {}
+            known_set = set(known.keys())
+            now_iso = datetime.now().isoformat()
+            today = datetime.now().strftime("%Y-%m-%d")
+            full_universe = dict(known)
+            for t in yf_tickers:
+                f = yf_fundamentals.get(t) or {}
+                base = full_universe.get(t, {})
+                full_universe[t] = {
+                    "shortName": f.get("shortName") or base.get("shortName") or t,
+                    "sector": f.get("sector") or base.get("sector"),
+                    "industry": f.get("industry") or base.get("industry"),
+                    "marketCap": f.get("marketCap") or base.get("marketCap"),
+                    "currentPrice": f.get("currentPrice") or base.get("currentPrice"),
+                    "country": f.get("country") or base.get("country"),
+                    "exchange": f.get("exchange") or base.get("exchange"),
+                    "date": today,
+                    "discovered_at": base.get("discovered_at") or (now_iso if t not in known_set else None),
+                    "last_seen_at": now_iso,
+                }
+            logger.info("scan_and_expand_universe: saving yfinance-only universe of %d tickers to DB", len(full_universe))
+            portfolio.save_universe(full_universe)
+            min_cap = uv.get("fmp_min_market_cap") or 500_000_000
+            active = {
+                t: {
+                    "shortName": info.get("shortName") or t,
+                    "sector": info.get("sector"),
+                    "industry": info.get("industry"),
+                    "marketCap": info.get("marketCap"),
+                    "currentPrice": info.get("currentPrice"),
+                    "country": info.get("country"),
+                    "exchange": info.get("exchange"),
+                    "date": today,
+                    "discovered_at": info.get("discovered_at"),
+                }
+                for t, info in full_universe.items()
+                if (info.get("marketCap") or 0) >= min_cap
+            }
+            logger.info("scan_and_expand_universe: active yfinance-only universe size=%d (min_mcap=%s)", len(active), min_cap)
+            if callback:
+                callback(f"Active universe (yfinance fallback): {len(active)} stocks (mcap > {min_cap/1e9:.1f}B)")
+            return active
+        except Exception as e:
+            logger.warning("scan_and_expand_universe: yfinance-only fallback failed: %s", e)
+            return _load_known_universe_as_fundamentals()
 
     all_tickers = {s["symbol"] for s in all_instruments if s.get("symbol")}
     logger.info("scan_and_expand_universe: %d tickers after exchange/type filter", len(all_tickers))
