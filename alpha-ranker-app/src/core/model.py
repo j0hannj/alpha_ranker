@@ -1627,7 +1627,7 @@ def assess_model_health(oos_metrics):
         hit = 0
     if icir is None or (isinstance(icir, float) and icir != icir):
         icir = 0
-    if mode == "simple_ensemble":
+    if oos_metrics.get("is_degraded") or mode in ("simple_ensemble", "simple_walk_forward"):
         reason = oos_metrics.get("simple_reason", "")
         if reason == "no_fmp_key":
             msg = "Momentum only: add FMP API key in Settings → Portfolio/API keys for full model (fundamentals + multi-horizon)."
