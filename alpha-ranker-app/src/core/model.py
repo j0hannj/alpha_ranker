@@ -1423,7 +1423,6 @@ def run_full_pipeline(callback=None):
             pass
 
     if fmp_key:
-        if callback: callback("Full mode: FMP + walk-forward ensemble")
         try:
             from core.engine_config import get_model_settings, init_default_config
             init_default_config()
@@ -1432,11 +1431,27 @@ def run_full_pipeline(callback=None):
                 set_global_seed(config.get("global_seed", GLOBAL_SEED))
         except Exception:
             config = {}
-        fund_db = fetch_all_fundamentals(list(yf_fund.keys()),fmp_key,callback)
-        if len(fund_db)<30:
-            return _run_simple(prices,yf_fund,macro,sector_map,callback,sentiment,alldata.get("data_freshness"), simple_reason="fmp_few_tickers")
-        horizons = (config or {}).get("horizons", [3, 6, 12, 24, 120])
-        primary_H = (config or {}).get("primary_horizon", 12)
+        config = config or {}
+        fmp_works = False
+        try:
+            test = fetch_fmp_quarterly("AAPL", fmp_key)
+            fmp_works = len(test) > 0
+        except Exception:
+            pass
+        used_yahoo_fallback = False
+        if fmp_works:
+            if callback:
+                callback("Full mode: FMP + walk-forward ensemble")
+            fund_db = fetch_all_fundamentals(list(yf_fund.keys()), fmp_key, callback)
+        else:
+            if callback:
+                callback("FMP API unavailable (403). Building fundamentals from Yahoo Finance...")
+            fund_db = build_fundamentals_from_yfinance(prices, yf_fund, callback)
+            used_yahoo_fallback = True
+        if len(fund_db) < 30:
+            return _run_simple(prices, yf_fund, macro, sector_map, callback, sentiment, alldata.get("data_freshness"), simple_reason="too_few_fundamentals")
+        horizons = config.get("horizons", [3, 6, 12, 24, 120])
+        primary_H = config.get("primary_horizon", 12)
         ref_year = as_of_date.year if as_of_date else datetime.now().year
         all_horizon_results = {}
         total_h = len(horizons)
@@ -1444,7 +1459,7 @@ def run_full_pipeline(callback=None):
             lbl = "10Y" if H == 120 else f"{H}M"
             if callback:
                 callback(f"Training {lbl} horizon ({idx+1}/{total_h})...", (idx + 0.1) / total_h)
-            config_h = {**(config or {}), "prediction_horizon_months": H}
+            config_h = {**config, "prediction_horizon_months": H}
             # Calibration window matches horizon: 10Y horizon → 10 years of data
             start_year_H = ref_year - max(H // 12, 1)
             wf = walk_forward_train(prices,fund_db,macro,sector_map,list(fund_db.keys()),
@@ -1473,6 +1488,8 @@ def run_full_pipeline(callback=None):
         model_info = {"mode":"walk_forward_ensemble","n_features":n_f,"blend":primary["blend"],
                       "prediction_horizon_months": primary_H,"horizons_trained": list(all_horizon_results.keys()),"primary_horizon": primary_H,
                       "per_horizon_metrics": {H: d["oos_metrics"] for H,d in all_horizon_results.items()}, **oos_metrics}
+        if used_yahoo_fallback:
+            model_info["fund_source"] = "yfinance"
         try:
             from core.engine_config import get_risk_settings
             regime_config = get_risk_settings()
@@ -1506,6 +1523,12 @@ def _run_simple(prices,yf_fund,macro,sector_map,callback=None,sentiment=None,dat
     ensemble,med,fc,results,feat_imp,oos = r
     oos["prediction_horizon_months"] = 12
     oos["simple_reason"] = simple_reason
+    oos["is_degraded"] = True
+    oos["degraded_warning"] = (
+        "Ce ranking utilise UNIQUEMENT des features techniques (momentum, volatilité, moyennes mobiles). "
+        "Les fondamentaux (PE, ROE, margins, growth...) ne sont PAS inclus. "
+        "Les prédictions sont moins fiables qu'en mode complet."
+    )
     if data_freshness: oos["data_freshness"] = data_freshness
     _store_model_state(ensemble, med, fc, prices, {}, sector_map, yf_fund)
     try:
