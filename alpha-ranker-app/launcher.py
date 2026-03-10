@@ -8,6 +8,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Basic logging to console so user sees progress in terminal
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
 # PyInstaller sets _MEIPASS for bundled mode
 if getattr(sys, 'frozen', False):
     BASE = Path(sys._MEIPASS)

@@ -54,6 +54,7 @@ def scan_and_expand_universe(callback=None):
     Merge with known universe from DB and persist. Called at start of fetch_all_data.
     Returns dict ticker -> {shortName, sector, marketCap, currentPrice, ...} (fundamentals format).
     """
+    logger.info("scan_and_expand_universe: start")
     api_key = os.environ.get("FMP_API_KEY")
     try:
         from . import portfolio
@@ -64,6 +65,7 @@ def scan_and_expand_universe(callback=None):
 
     # Optional: skip scan if last scan was recent
     uv = get_universe_settings()
+    logger.info("scan_and_expand_universe: universe_settings=%s", uv)
     scan_freq_h = uv.get("scan_frequency_hours", 24)
     if scan_freq_h and scan_freq_h > 0:
         try:
@@ -72,6 +74,7 @@ def scan_and_expand_universe(callback=None):
                 from datetime import datetime as dt
                 last_dt = dt.fromisoformat(last)
                 if (datetime.now() - last_dt).total_seconds() < scan_freq_h * 3600:
+                    logger.info("scan_and_expand_universe: using cached scan (last=%s, freq_h=%s)", last, scan_freq_h)
                     if callback:
                         callback("Universe: using cached scan (recent).")
                     return _load_known_universe_as_fundamentals()
@@ -79,6 +82,7 @@ def scan_and_expand_universe(callback=None):
             pass
 
     if not api_key:
+        logger.warning("scan_and_expand_universe: missing FMP_API_KEY")
         if callback:
             callback("FMP key needed to discover new stocks. Set it in Settings.")
         return _load_known_universe_as_fundamentals()
@@ -88,10 +92,17 @@ def scan_and_expand_universe(callback=None):
     limit = uv.get("fmp_screener_limit") or 3000
     today = datetime.now().strftime("%Y-%m-%d")
 
+    logger.info(
+        "scan_and_expand_universe: scanning %d exchanges (min_cap=%s, limit=%s)",
+        len(exchange_list),
+        min_cap,
+        limit,
+    )
     discovered = {}
     for exchange_str in exchange_list:
         label = exchange_str.split(",")[0] if exchange_str else "?"
         try:
+            logger.info("scan_and_expand_universe: scanning exchange=%s", exchange_str)
             if callback:
                 callback(f"Scanning {label}...")
             url = (
@@ -118,16 +129,24 @@ def scan_and_expand_universe(callback=None):
                     "country": item.get("country"),
                     "exchange": item.get("exchangeShortName") or label,
                 }
+            n_items = len(data) if isinstance(data, list) else 0
+            logger.info("scan_and_expand_universe: %s -> %d stocks", label, n_items)
             if callback:
-                callback(f"  {label}: {len(data) if isinstance(data, list) else 0} stocks found")
+                callback(f"  {label}: {n_items} stocks found")
         except Exception as e:
-            logger.warning("FMP screener %s failed: %s", exchange_str, e)
+            logger.warning("scan_and_expand_universe: FMP screener %s failed: %s", exchange_str, e)
             if callback:
                 callback(f"  {label} scan error: {e}")
 
     known = portfolio.get_universe()
     known_set = set(known.keys())
     new_tickers = set(discovered.keys()) - known_set
+    logger.info(
+        "scan_and_expand_universe: complete. total_discovered=%d, new=%d, known_before=%d",
+        len(discovered),
+        len(new_tickers),
+        len(known_set),
+    )
     if callback:
         callback(f"Scan complete: {len(discovered)} total, {len(new_tickers)} NEW discoveries")
 
@@ -147,11 +166,13 @@ def scan_and_expand_universe(callback=None):
             "discovered_at": now_iso if t in new_tickers else known.get(t, {}).get("discovered_at"),
         }
 
+    logger.info("scan_and_expand_universe: saving universe of %d tickers to DB", len(full))
     portfolio.save_universe(full)
     try:
         portfolio.set_setting("universe_last_scan", datetime.now().isoformat())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("scan_and_expand_universe: failed to persist universe_last_scan: %s", e)
+    logger.info("scan_and_expand_universe: end")
     return full
 
 
