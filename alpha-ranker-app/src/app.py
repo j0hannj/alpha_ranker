@@ -1513,7 +1513,6 @@ class AlphaRanker(ctk.CTk):
         self._universe_progress.set(0); self._universe_progress.grid(); self._universe_status_lbl.grid(); self._universe_status_lbl.configure(text="Préparation…")
         self._btn_auto_fill_cancel.grid()
         self._universe_auto_fill_cancel_event=threading.Event()
-        result_holder=[]
         def progress_cb(current,total,msg):
             def _update():
                 if total>0:
@@ -1523,7 +1522,6 @@ class AlphaRanker(ctk.CTk):
         def worker():
             from data.universe_builder import auto_fill_universe
             r=auto_fill_universe(target_count=target,progress_callback=progress_cb,cancel_event=self._universe_auto_fill_cancel_event)
-            result_holder.append(r)
             self.after(0,lambda:self._on_auto_fill_complete(r))
         threading.Thread(target=worker,daemon=True).start()
 
