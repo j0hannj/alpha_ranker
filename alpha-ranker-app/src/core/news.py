@@ -36,12 +36,9 @@ def get_ticker_news(ticker, max_results=5):
 # ─────────────────────────────────────────────────────────────
 
 def web_search(query, max_results=5):
-    """Search the web via DuckDuckGo. Free, no API key."""
+    """Search the web via DuckDuckGo. Free, no API key. Uses ddgs package (pip install ddgs)."""
     try:
-        try:
-            from ddgs import DDGS
-        except ImportError:
-            from duckduckgo_search import DDGS
+        from ddgs import DDGS
         with DDGS() as ddgs:
             results = []
             for r in ddgs.text(query, max_results=max_results):

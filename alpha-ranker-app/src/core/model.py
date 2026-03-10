@@ -87,38 +87,54 @@ def fetch_fmp_quarterly(ticker, api_key, limit=40):
     return results
 
 def fetch_all_fundamentals(tickers, api_key, callback=None):
+    """Fetch FMP fundamentals. Uses per-ticker SQLite cache: only requests tickers not already cached."""
+    data = {}
+    to_fetch = []
     try:
         from .api_cache import get as cache_get, set as cache_set
-        cached = cache_get("fmp_fundamentals", "bulk", max_age_hours=7*24)
-        if cached and isinstance(cached, dict) and len(cached) > 50:
-            if callback: callback(f"FMP cache (SQLite): {len(cached)} tickers")
-            return cached
+        for t in tickers:
+            cached = cache_get("fmp_fund", t, max_age_hours=7*24)
+            if cached and isinstance(cached, list) and len(cached) > 0:
+                data[t] = cached
+            else:
+                to_fetch.append(t)
     except Exception:
-        pass
-    cache = {}
-    if FUNDAMENTALS_CACHE.exists():
+        to_fetch = list(tickers)
+    if not to_fetch and data:
+        if callback: callback(f"FMP cache (SQLite): {len(data)} tickers (no request)")
+        return data
+    if FUNDAMENTALS_CACHE.exists() and not data:
         try:
             cache = json.loads(FUNDAMENTALS_CACHE.read_text(encoding="utf-8"))
             if (datetime.now()-datetime.fromisoformat(cache.get("_date","2000-01-01"))).days < 7:
-                data = {k:v for k,v in cache.items() if k!="_date"}
-                if len(data)>50:
-                    if callback: callback(f"FMP cache: {len(data)} tickers")
+                data = {k: v for k, v in cache.items() if k != "_date" and k in tickers}
+                to_fetch = [t for t in tickers if t not in data]
+                if not to_fetch and len(data) > 50:
+                    if callback: callback(f"FMP cache (file): {len(data)} tickers")
                     return data
-        except: pass
-    if callback: callback(f"FMP: fetching {len(tickers)} tickers...")
-    data = {}
-    for i,t in enumerate(tickers):
-        if callback and (i+1)%25==0: callback(f"FMP: {i+1}/{len(tickers)}...")
+        except Exception:
+            pass
+    if to_fetch and callback:
+        callback(f"FMP: fetching {len(to_fetch)}/{len(tickers)} tickers (rest from cache)...")
+    for i, t in enumerate(to_fetch):
+        if callback and (i+1) % 25 == 0:
+            callback(f"FMP: {i+1}/{len(to_fetch)}...")
         try:
-            rows = fetch_fmp_quarterly(t,api_key)
-            if rows: data[t]=rows
-        except: pass
-    payload = {**data, "_date": datetime.now().isoformat()}
-    FUNDAMENTALS_CACHE.write_text(json.dumps(payload, default=str), encoding="utf-8")
-    try:
-        cache_set("fmp_fundamentals", "bulk", data)
-    except Exception:
-        pass
+            rows = fetch_fmp_quarterly(t, api_key)
+            if rows:
+                data[t] = rows
+                try:
+                    cache_set("fmp_fund", t, rows)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    if data:
+        try:
+            payload = {**data, "_date": datetime.now().isoformat()}
+            FUNDAMENTALS_CACHE.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        except Exception:
+            pass
     if callback: callback(f"FMP: {len(data)} tickers loaded")
     return data
 

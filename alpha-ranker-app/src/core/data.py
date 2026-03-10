@@ -39,6 +39,7 @@ def fetch_universe(years=5):
             if tickers and prices_json is not None:
                 try:
                     prices = pd.read_json(prices_json, orient="split")
+                    prices = prices.sort_index()
                     return tickers, prices, fundamentals
                 except Exception:
                     pass
