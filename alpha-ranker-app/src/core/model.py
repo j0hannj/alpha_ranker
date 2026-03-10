@@ -832,6 +832,17 @@ def walk_forward_train(prices, fundamentals_db, macro, sector_map, tickers,
             "per_model_ic":{n:round(np.mean(v),4) for n,v in per_model_oos.items() if v}}
     else:
         oos_metrics = {"n_predictions":0,"per_model_ic":{},"mean_ic":0,"ic_std":0,"ic_ir":0,"hit_rate":0,"spearman_rank_corr":0,"mean_ls_return":0}
+    mean_ls = oos_metrics.get("mean_ls_return", 0)
+    if mean_ls is None or float(mean_ls) == 0:
+        n_pred = oos_metrics.get("n_predictions", 0)
+        n_per = oos_metrics.get("n_periods", 0)
+        if n_pred == 0:
+            logger.warning("walk_forward_train: mean_ls_return=0 because no OOS predictions (oos_df empty)")
+        else:
+            logger.warning(
+                "walk_forward_train: mean_ls_return=0 with n_predictions=%s, n_periods=%s -> need each period to have >=10 stocks to compute long-short; predicted_return_pct will be 0",
+                n_pred, n_per,
+            )
     if callback:
         callback(f"Ensemble OOS Rank IC: {oos_metrics.get('spearman_rank_corr','?')}")
         for n,ic in oos_metrics.get("per_model_ic",{}).items(): callback(f"  {n}: IC={ic:.4f}")
