@@ -10,7 +10,7 @@ from tkinter import ttk, messagebox
 import tkinter as tk
 from core import portfolio, data, model, agent
 from core.ranking_insights import add_ranking_insights
-from core.api_cache import get_isin_map, get_display_id, get_stored_universe_list
+from core.api_cache import get_isin_map, get_display_id, get_stored_universe_list, set_stored_universe_list, set_isin_map
 from core.ollama_setup import (is_ollama_installed, is_ollama_running,
                                 full_setup as ollama_full_setup, MODELS as OLLAMA_MODELS)
 try:
@@ -1453,7 +1453,7 @@ class AlphaRanker(ctk.CTk):
         self._universe_status_lbl=ctk.CTkLabel(autofill,text="",font=("",9),text_color="#71717a"); self._universe_status_lbl.grid(row=0,column=6,padx=4,pady=2); self._universe_status_lbl.grid_remove()
         self._btn_auto_fill_cancel=ctk.CTkButton(autofill,text="Annuler",width=80,height=28,font=("",10),fg_color="#7f1d1d",command=self._on_auto_fill_cancel); self._btn_auto_fill_cancel.grid(row=0,column=7,padx=4,pady=2); self._btn_auto_fill_cancel.grid_remove()
         self._universe_auto_fill_cancel_event=None
-        # Left: list of tickers (Treeview)
+        # Left: list of tickers (Treeview) + add ISIN manually
         left=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8,width=220); left.grid(row=2,column=0,sticky="nsew",padx=(0,4),pady=0)
         left.grid_propagate(False)
         left.grid_rowconfigure(1,weight=1); left.grid_columnconfigure(0,weight=1)
@@ -1462,6 +1462,12 @@ class AlphaRanker(ctk.CTk):
         self._universe_tree, self._universe_sb = self._universe_build_list(left)
         self._universe_tree.grid(row=1,column=0,sticky="nsew",padx=4,pady=(0,4))
         if self._universe_sb: self._universe_sb.grid(row=1,column=1,sticky="ns",pady=(0,4))
+        add_isin_f=ctk.CTkFrame(left,fg_color="transparent"); add_isin_f.grid(row=2,column=0,columnspan=2,sticky="ew",padx=6,pady=(4,6))
+        add_isin_f.grid_columnconfigure(1,weight=1)
+        ctk.CTkLabel(add_isin_f,text="ISIN:",font=("",10),text_color="#a1a1aa").grid(row=0,column=0,padx=(0,4),pady=2,sticky="w")
+        self._universe_add_isin_entry=ctk.CTkEntry(add_isin_f,width=140,height=26,font=("",10),placeholder_text="ex. US0378331005")
+        self._universe_add_isin_entry.grid(row=0,column=1,padx=(0,4),pady=2,sticky="ew")
+        ctk.CTkButton(add_isin_f,text="Ajouter",width=70,height=26,font=("",10),fg_color="#27272a",command=self._universe_add_isin_clicked).grid(row=0,column=2,pady=2)
         # Right: chart area
         self._universe_chart=ctk.CTkFrame(tab,fg_color="#09090b",corner_radius=8); self._universe_chart.grid(row=2,column=1,sticky="nsew",padx=4,pady=0)
         self._universe_chart.grid_columnconfigure(0,weight=1); self._universe_chart.grid_rowconfigure(0,weight=1)
@@ -1484,18 +1490,44 @@ class AlphaRanker(ctk.CTk):
             tickers=get_stored_universe_list()
             if not tickers:
                 tickers=get_cached_ticker_list()
-            st=get_cache_status()
-            n=st.get("n_tickers") or len(tickers)
-            self._universe_count_lbl.configure(text=f"{len(tickers)} (stockés en base)" if tickers else "Aucun (lancer un fetch data)")
+            imap=get_isin_map()
+            n_isins=sum(1 for t in tickers if imap.get(t))
+            if tickers:
+                self._universe_count_lbl.configure(text=f"{len(tickers)} titres — {n_isins} ISIN")
+            else:
+                self._universe_count_lbl.configure(text="Aucun (lancer un fetch data)")
         except Exception:
-            tickers=[]; self._universe_count_lbl.configure(text="")
+            tickers=[]; imap={}; self._universe_count_lbl.configure(text="")
         for c in self._universe_tree.get_children(""): self._universe_tree.delete(c)
-        imap=get_isin_map()
         for sym in sorted(tickers):
             self._universe_tree.insert("","end",values=(get_display_id(sym,imap),sym))
 
     def _universe_refresh(self):
         self._universe_fill_tickers()
+
+    def _universe_add_isin_clicked(self):
+        isin=(self._universe_add_isin_entry.get() or "").strip().upper().replace(" ","")
+        if len(isin)<10:
+            messagebox.showwarning("ISIN","Veuillez saisir un ISIN valide (12 caractères).")
+            return
+        try:
+            from data.isin_mapper import map_isin_to_ticker
+            tickers=list(get_stored_universe_list())
+            imap=get_isin_map()
+            ticker=map_isin_to_ticker(isin)
+            key=ticker if ticker else isin
+            if key in tickers and imap.get(key)==isin:
+                messagebox.showinfo("ISIN","Cet ISIN est déjà dans l'univers.")
+                return
+            if key not in tickers:
+                tickers.append(key)
+            set_stored_universe_list(tickers)
+            set_isin_map({key:isin})
+            self._universe_add_isin_entry.delete(0,"end")
+            self._universe_fill_tickers()
+            messagebox.showinfo("ISIN",f"Ajouté: {key} — {isin}")
+        except Exception as e:
+            messagebox.showerror("ISIN",f"Erreur: {e}")
 
     def _on_auto_fill_clicked(self):
         try:
